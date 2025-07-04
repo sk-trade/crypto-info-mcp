@@ -1,0 +1,80 @@
+name: Docker Image CICD
+
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+  workflow_dispatch:
+  
+jobs:
+
+  build:
+    runs-on: self-hosted
+
+    outputs:
+      version: ${{ steps.get_version.outputs.version }}
+
+    steps:
+    - uses: actions/checkout@v3
+
+    - name: Extract version from pyproject.toml
+      id: get_version
+      run: echo "VERSION=$(grep '^version =' pyproject.toml | sed -E 's/version = \"(.*)\"/\1/')" >> $GITHUB_OUTPUT
+
+    - name: Set up Docker Buildx
+      uses: docker/setup-buildx-action@v2
+
+    - name: Build Docker image
+      run: docker build -t myapp:${{ steps.get_version.outputs.VERSION }} -f Dockerfile .
+
+    - name: Run Docker container
+      run: docker run -d -p 8123:8123 --name myapp-container myapp:${{ steps.get_version.outputs.VERSION }}
+
+    - name: Cleanup container
+      if: always()
+      run: |
+        docker stop myapp-container || true
+        docker rm myapp-container || true
+    
+
+  deploy:
+    needs: build
+    runs-on: self-hosted
+
+    steps:
+    - uses: actions/checkout@v3
+
+    - name: Copy files to server
+      uses: appleboy/scp-action@master
+      with:
+        host: ${{ secrets.SERVER_HOST }}
+        username: ${{ secrets.SERVER_USERNAME }}
+        key: ${{ secrets.SSH_PRIVATE_KEY }}
+        source: "."
+        target: "~/docker/${{ github.event.repository.name }}"
+        rm: true
+
+    - name: Deploy to Ubuntu server
+      uses: appleboy/ssh-action@master
+      with:
+        host: ${{ secrets.SERVER_HOST }}
+        username: ${{ secrets.SERVER_USERNAME }}
+        key: ${{ secrets.SSH_PRIVATE_KEY }}
+        script: |
+          REPO_FULL_NAME="${{ github.repository }}"  # owner/reponame 형식
+          REPO_NAME=$(echo $REPO_FULL_NAME | cut -d'/' -f2) 
+
+          cd ~/docker/
+          mkdir -p $REPO_NAME
+          cd $REPO_NAME
+
+          echo "LOG_LEVEL=${{ vars.LOG_LEVEL }}" > .env
+          echo "VERSION=${{ needs.build.outputs.version }}" >> .env
+          echo "COINGECKO_API_KEY=${{ secrets.COINGECKO_API_KEY }}" >> .env
+          echo "TELEGRAM_API_ID=${{ secrets.TELEGRAM_API_ID }}" >> .env
+          echo "TELEGRAM_API_HASH=${{ secrets.TELEGRAM_API_HASH }}" >> .env
+          
+          docker compose down --rmi all
+          docker compose build --no-cache
+          docker compose up -d

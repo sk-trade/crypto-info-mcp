@@ -1,0 +1,21 @@
+services:
+  crypto-info-mcp:
+      build: 
+        context: .
+        args:
+          VERSION: ${VERSION}
+        tags:
+          - "crypto-info-mcp:${VERSION}"
+      image: crypto-info-mcp:${VERSION}
+      container_name: crypto-info-mcp
+      restart: unless-stopped
+      ports:
+        - "18123:8123"
+      networks:
+        - bridge_server
+      env_file:
+        - .env
+
+networks:
+  bridge_server:
+    external: true

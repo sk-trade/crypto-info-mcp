@@ -1,0 +1,51 @@
+name: Dev Docker Image CICD
+
+on:
+  push:
+    branches: [ "dev" ]
+  workflow_dispatch:
+
+jobs:
+
+  build:
+    runs-on: self-hosted
+
+    steps:
+    - uses: actions/checkout@v2
+
+    - name: Extract version from pyproject.toml
+      id: get_version
+      run: echo "VERSION=$(grep '^version =' pyproject.toml | sed -E 's/version = \"(.*)\"/\1/')" >> $GITHUB_ENV
+
+    - name: Set up Docker Buildx
+      uses: docker/setup-buildx-action@v2
+
+    - name: Build Docker image
+      run: docker build -t myapp:${{ env.VERSION }} -f Dockerfile .
+
+    - name: Run Tests with Docker
+      run: docker run --name myapp-container myapp:${{ env.VERSION }} pytest --disable-warnings -v
+
+    - name: Tests logs
+      if: always() 
+      run: |
+          echo "=== Docker Container Status ==="
+          docker ps -a
+          echo "=== Docker Container Logs ==="
+          docker logs myapp-container || true
+
+    - name: Cleanup container
+      if: always() # 이전 단계의 성공/실패 여부와 관계없이 항상 실행
+      run: docker rm -f myapp-container || true
+
+    # - name: action-slack
+    #   uses: 8398a7/action-slack@v3
+    #   with:
+    #     status: ${{ job.status }}
+    #     author_name: Gibhub Actions - build
+    #     fields: repo,commit,message,author # action,eventName,ref,workflow,job,took 추가할 수 있음
+    #     mention: here
+    #     if_mention: failure,cancelled
+    #   env:
+    #     SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_ALARM }} # required
+    #   if: always() # Pick up events even if the job fails or is canceled.
