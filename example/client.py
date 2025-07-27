@@ -149,7 +149,7 @@ async def main():
     parser.add_argument("--port", type=int, default=8123, help="The port number of the MCP server.") 
     args = parser.parse_args()
 
-    server_url = f"http://{args.host}:{args.port}"
+    server_url = f"http://{args.host}:{args.port}/mcp/"
     client = CryptoAssistantClient()
 
     try:
