@@ -75,6 +75,7 @@ jobs:
           echo "COINGECKO_API_KEY=${{ secrets.COINGECKO_API_KEY }}" >> .env
           echo "TELEGRAM_API_ID=${{ secrets.TELEGRAM_API_ID }}" >> .env
           echo "TELEGRAM_API_HASH=${{ secrets.TELEGRAM_API_HASH }}" >> .env
+          echo "TELEGRAM_SESSION_STRING=${{ secrets.TELEGRAM_SESSION_STRING }}" >> .env
           
           docker compose down --rmi all
           docker compose build --no-cache

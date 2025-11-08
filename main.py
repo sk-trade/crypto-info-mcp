@@ -1,10 +1,12 @@
 import asyncio
+from contextlib import asynccontextmanager
 import os
 from datetime import datetime, timedelta, timezone
 
 import httpx  
 from dotenv import load_dotenv
 from telethon import TelegramClient
+from telethon.sessions import StringSession
 
 from fastmcp import FastMCP
 from fastmcp.exceptions import FastMCPError
@@ -16,29 +18,45 @@ load_dotenv()
 COINGECKO_API_KEY = os.getenv("COINGECKO_API_KEY")
 TELEGRAM_API_ID = os.getenv("TELEGRAM_API_ID")
 TELEGRAM_API_HASH = os.getenv("TELEGRAM_API_HASH")
-SESSION_NAME = 'telegram_session'
+TELEGRAM_SESSION_STRING = os.getenv("TELEGRAM_SESSION_STRING")
 
-# FastMCP 앱 인스턴스 생성
-mcp = FastMCP("Intelligent Crypto Assistant")
-
-# 텔레그램 클라이언트 
 telegram_client = None
 
-
-# --- 내부 헬퍼 함수 ---
-
-async def _get_telegram_client():
+@asynccontextmanager
+async def lifespan(app: FastMCP):
     """
-    애플리케이션 전역에서 사용될 단일 텔레그램 클라이언트 인스턴스를 생성하고 연결합니다.
-    이미 연결된 클라이언트가 있으면 그것을 반환합니다.
+    서버 시작 시 초기화된 전역 텔레그램 클라이언트 인스턴스를 반환합니다.
     """
     global telegram_client
-    if telegram_client is None or not telegram_client.is_connected():
-        client = TelegramClient(SESSION_NAME, TELEGRAM_API_ID, TELEGRAM_API_HASH)
+    if not all([TELEGRAM_API_ID, TELEGRAM_API_HASH, TELEGRAM_SESSION_STRING]):
+        print("텔레그램 환경 변수가 설정되지않아 관련 기능이 비활성화됩니다.")
+    else:
+        print("Connecting to Telegram...")
+        client = TelegramClient(StringSession(TELEGRAM_SESSION_STRING), TELEGRAM_API_ID, TELEGRAM_API_HASH)
         await client.connect()
         if not await client.is_user_authorized():
             print("텔레그램 인증이 필요합니다. 로컬에서 스크립트를 실행하여 세션 파일을 생성해주세요.")
-        telegram_client = client
+            telegram_client = None
+        else:
+            telegram_client = client
+            print("텔레그램 클라이언트 연결 완료.")
+    yield
+    if telegram_client and telegram_client.is_connected():
+        print("Disconnecting from Telegram...")
+        await telegram_client.disconnect()
+        print("텔레그램 클라이언트 연결 해제 완료.")
+
+# FastMCP 앱 인스턴스 생성
+mcp = FastMCP("Intelligent Crypto Assistant", lifespan=lifespan)
+
+# --- 내부 헬퍼 함수 ---
+
+async def _get_telegram_client() -> TelegramClient:
+    """
+    서버 시작 시 초기화된 전역 텔레그램 클라이언트 인스턴스를 반환합니다.
+    """
+    if telegram_client is None:
+        raise FastMCPError("텔레그램 클라이언트가 초기화되지 않았거나 인증에 실패했습니다.")
     return telegram_client
 
 async def _fetch_fear_and_greed_index():
@@ -91,19 +109,20 @@ async def get_market_overview() -> str:
     fng_data, global_data, whale_alerts = await asyncio.gather(
         _fetch_fear_and_greed_index(),
         _fetch_global_market_data(),
-        _fetch_whale_alerts()
+        _fetch_whale_alerts(),
+        return_exceptions=True
     )
 
     report = ["현재 시장 개요 브리핑:"]
-    if fng_data:
+    if not isinstance(fng_data, Exception) and fng_data:
         report.append(f"- 시장 심리: '{fng_data.get('value_classification', 'N/A')}' (지수: {fng_data.get('value', 'N/A')})")
 
-    if global_data and 'market_cap_percentage' in global_data:
+    if not isinstance(global_data, Exception) and global_data and 'market_cap_percentage' in global_data:
         btc_dom = global_data['market_cap_percentage'].get('btc', 0)
         eth_dom = global_data['market_cap_percentage'].get('eth', 0)
         report.append(f"- 시장 지배력: BTC {btc_dom:.1f}%, ETH {eth_dom:.1f}%")
 
-    if whale_alerts:
+    if not isinstance(whale_alerts, Exception) and whale_alerts:
         report.append("- 주요 자금 이동 (지난 1시간):")
         for alert in whale_alerts:
             cleaned_alert = alert.replace('\n', ' ').strip()
@@ -183,7 +202,5 @@ if __name__ == "__main__":
     print("🚀 Intelligent Crypto Assistant (FastMCP) 서버를 시작합니다.")
     print("   - 서버 주소: http://0.0.0.0:8123")
     print("   - 종료하려면 Ctrl+C를 누르세요.")
-    print("\n[필수] 텔레그램 기능을 사용하려면 'telegram_session.session' 파일이 필요합니다.")
-    print("       파일이 없다면, 먼저 로컬 환경에서 이 스크립트를 실행하여 전화번호 인증을 완료하세요.\n")
 
     mcp.run(transport="streamable-http", host="0.0.0.0", port=8123)
