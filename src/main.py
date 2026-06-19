@@ -3,7 +3,7 @@ from contextlib import asynccontextmanager
 import os
 from datetime import datetime, timedelta, timezone
 
-import httpx  
+import httpx
 from dotenv import load_dotenv
 from telethon import TelegramClient
 from telethon.sessions import StringSession
@@ -21,6 +21,19 @@ TELEGRAM_API_HASH = os.getenv("TELEGRAM_API_HASH")
 TELEGRAM_SESSION_STRING = os.getenv("TELEGRAM_SESSION_STRING")
 
 telegram_client = None
+
+
+def _format_coin_details(details: dict) -> str:
+    price_krw = details.get('market_data', {}).get('current_price', {}).get('krw', 'N/A')
+
+    report = [
+        f"'{details.get('name', 'N/A')}' ({details.get('symbol', 'N/A').upper()}) 상세 정보:",
+        f"- 시가총액 순위: {details.get('market_cap_rank', 'N/A')}위",
+        f"- 현재 가격: ₩{price_krw:,}" if isinstance(price_krw, (int, float)) else f"- 현재 가격: {price_krw}",
+        f"- 홈페이지: {details.get('links', {}).get('homepage', ['N/A'])[0]}"
+    ]
+    return "\n".join(report)
+
 
 @asynccontextmanager
 async def lifespan(app: FastMCP):
@@ -95,6 +108,7 @@ async def _fetch_whale_alerts():
                 messages_text.append(message.text)
     except Exception as e:
         print(f"Whale Alert Fetch Error: {e}")
+        return []
     return messages_text
 
 
@@ -139,6 +153,8 @@ async def get_coin_details(coin_id: str) -> str:
     """
     if not COINGECKO_API_KEY:
         raise FastMCPError("서버에 CoinGecko API 키가 설정되지 않았습니다.")
+    if not coin_id or not coin_id.strip():
+        raise FastMCPError("CoinGecko 코인 ID를 입력해주세요.")
     try:
         url = f"https://api.coingecko.com/api/v3/coins/{coin_id}?localization=false&tickers=false&community_data=false&developer_data=false"
         headers = {'x-cg-demo-api-key': COINGECKO_API_KEY}
@@ -147,15 +163,7 @@ async def get_coin_details(coin_id: str) -> str:
             response.raise_for_status()
             details = response.json()
 
-        price_krw = details.get('market_data', {}).get('current_price', {}).get('krw', 'N/A')
-
-        report = [
-            f"'{details.get('name', 'N/A')}' ({details.get('symbol', 'N/A').upper()}) 상세 정보:",
-            f"- 시가총액 순위: {details.get('market_cap_rank', 'N/A')}위",
-            f"- 현재 가격: ₩{price_krw:,}" if isinstance(price_krw, (int, float)) else f"현재 가격: {price_krw}",
-            f"- 홈페이지: {details.get('links', {}).get('homepage', ['N/A'])[0]}"
-        ]
-        return "\n".join(report)
+        return _format_coin_details(details)
     except httpx.HTTPStatusError as e:
         if e.response.status_code == 404:
             raise FastMCPError(f"'{coin_id}' 코인을 찾을 수 없습니다. ID를 확인해주세요.")
@@ -174,11 +182,13 @@ async def get_realtime_news(hours: int = 1) -> str:
     if not (1 <= hours <= 72):
         raise FastMCPError("'hours' 파라미터는 1과 72 사이의 값이어야 합니다.")
 
-    client = await _get_telegram_client()
     channels = ['wublockchainenglish', 'watcherguru']
     time_offset = datetime.now(timezone.utc) - timedelta(hours=hours)
 
+    client = await _get_telegram_client()
+
     # 각 채널에서 메시지를 가져오는 작업을 비동기 태스크로 생성
+
     async def fetch_for_channel(ch):
         messages = []
         async for msg in client.iter_messages(ch, offset_date=time_offset, reverse=True, limit=10):
