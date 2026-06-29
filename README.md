@@ -16,6 +16,7 @@ Set these in `.env` before starting the service:
 - `TELEGRAM_API_ID` - required to open the Telegram session.
 - `TELEGRAM_API_HASH` - required to open the Telegram session.
 - `TELEGRAM_SESSION_STRING` - required to read Telegram channels.
+- `VERSION` - optional Docker image tag; defaults to `local` in Docker Compose.
 
 If Telegram variables are missing, market overview still works and reports no whale movement.
 
@@ -46,7 +47,7 @@ docker run --rm -p 8123:8123 --env-file .env crypto-info-mcp
 
 ## Docker Compose
 
-`docker-compose.yml` expects an existing external network named `bridge_server` and an `.env` file in the repo root.
+`docker-compose.yml` expects an existing external network named `bridge_server` and an `.env` file in the repo root. If `VERSION` is omitted, Compose tags the local image as `crypto-info-mcp:local`.
 
 ```bash
 docker compose up --build
@@ -54,13 +55,13 @@ docker compose up --build
 
 ## Telegram session generation
 
-Use the helper script to create a Telegram session string after you have a valid API ID and API hash:
+Use the helper script to create a Telegram session string after you have a valid API ID and API hash in `.env`:
 
 ```bash
 uv run python scripts/generate_session.py
 ```
 
-Copy the printed session string into `TELEGRAM_SESSION_STRING`.
+Follow the interactive Telegram login prompt, then copy the printed session string into `TELEGRAM_SESSION_STRING`.
 
 ## Limitations
 

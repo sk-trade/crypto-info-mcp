@@ -65,6 +65,20 @@ class FakeTelegramClient:
         return True
 
 
+class FailingStartupTelegramClient:
+    def __init__(self, *args, **kwargs):
+        self.disconnected = False
+
+    async def connect(self):
+        raise RuntimeError("connection failed")
+
+    def is_connected(self):
+        return False
+
+    async def disconnect(self):
+        self.disconnected = True
+
+
 class FakeMessage:
     def __init__(self, text, date):
         self.text = text
@@ -169,6 +183,18 @@ async def test_realtime_news_rejects_invalid_hours():
 async def test_telegram_client_helper_raises_when_disabled():
     with pytest.raises(main_module.FastMCPError, match="초기화되지 않았거나 인증에 실패"):
         await main_module._get_telegram_client()
+
+
+@pytest.mark.asyncio
+async def test_lifespan_disables_telegram_when_startup_connection_fails(monkeypatch):
+    main_module.TELEGRAM_API_ID = "123"
+    main_module.TELEGRAM_API_HASH = "hash"
+    main_module.TELEGRAM_SESSION_STRING = "session"
+    monkeypatch.setattr(main_module, "StringSession", lambda session: object())
+    monkeypatch.setattr(main_module, "TelegramClient", FailingStartupTelegramClient)
+
+    async with main_module.lifespan(None):
+        assert main_module.telegram_client is None
 
 
 @pytest.mark.asyncio

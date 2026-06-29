@@ -44,15 +44,22 @@ async def lifespan(app: FastMCP):
     if not all([TELEGRAM_API_ID, TELEGRAM_API_HASH, TELEGRAM_SESSION_STRING]):
         print("텔레그램 환경 변수가 설정되지않아 관련 기능이 비활성화됩니다.")
     else:
-        print("Connecting to Telegram...")
-        client = TelegramClient(StringSession(TELEGRAM_SESSION_STRING), TELEGRAM_API_ID, TELEGRAM_API_HASH)
-        await client.connect()
-        if not await client.is_user_authorized():
-            print("텔레그램 인증이 필요합니다. 로컬에서 스크립트를 실행하여 세션 파일을 생성해주세요.")
+        client = None
+        try:
+            print("Connecting to Telegram...")
+            client = TelegramClient(StringSession(TELEGRAM_SESSION_STRING), TELEGRAM_API_ID, TELEGRAM_API_HASH)
+            await client.connect()
+            if not await client.is_user_authorized():
+                print("텔레그램 인증이 필요합니다. 로컬에서 스크립트를 실행하여 세션 파일을 생성해주세요.")
+                telegram_client = None
+            else:
+                telegram_client = client
+                print("텔레그램 클라이언트 연결 완료.")
+        except Exception as e:
+            print(f"텔레그램 초기화 실패로 관련 기능이 비활성화됩니다: {e}")
             telegram_client = None
-        else:
-            telegram_client = client
-            print("텔레그램 클라이언트 연결 완료.")
+            if client and client.is_connected():
+                await client.disconnect()
     yield
     if telegram_client and telegram_client.is_connected():
         print("Disconnecting from Telegram...")

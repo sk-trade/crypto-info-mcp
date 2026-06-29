@@ -3,10 +3,10 @@ services:
       build: 
         context: .
         args:
-          VERSION: ${VERSION}
+          VERSION: ${VERSION:-local}
         tags:
-          - "crypto-info-mcp:${VERSION}"
-      image: crypto-info-mcp:${VERSION}
+          - "crypto-info-mcp:${VERSION:-local}"
+      image: crypto-info-mcp:${VERSION:-local}
       container_name: crypto-info-mcp
       restart: unless-stopped
       ports:
