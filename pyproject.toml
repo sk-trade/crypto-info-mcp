@@ -1,7 +1,7 @@
 [project]
 name = "crypto-info-mcp"
 version = "0.1.3"
-description = "FastMCP service for cryptocurrency market context, coin details, and Telegram-backed news."
+description = "Add your description here"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
