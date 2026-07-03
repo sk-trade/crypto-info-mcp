@@ -51,6 +51,8 @@ async def lifespan(app: FastMCP):
             await client.connect()
             if not await client.is_user_authorized():
                 print("텔레그램 인증이 필요합니다. 로컬에서 스크립트를 실행하여 세션 파일을 생성해주세요.")
+                if client.is_connected():
+                    await client.disconnect()
                 telegram_client = None
             else:
                 telegram_client = client
