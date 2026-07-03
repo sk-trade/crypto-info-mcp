@@ -78,3 +78,80 @@ async def test_main_starts_client_prints_session_and_disconnects(monkeypatch, ca
     assert created_clients[0].started is True
     assert created_clients[0].disconnected is True
     assert "session-string" in capsys.readouterr().out
+
+
+@pytest.mark.asyncio
+async def test_main_prints_session_even_if_disconnect_cleanup_fails(monkeypatch, capsys):
+    created_clients = []
+
+    class FakeSession:
+        def save(self):
+            return "session-string"
+
+    class FakeTelegramClient:
+        def __init__(self, session, api_id, api_hash):
+            self.session = FakeSession()
+            self.started = False
+            self.disconnect_calls = 0
+            created_clients.append(self)
+
+        async def start(self):
+            self.started = True
+
+        async def is_user_authorized(self):
+            return True
+
+        def is_connected(self):
+            return True
+
+        async def disconnect(self):
+            self.disconnect_calls += 1
+            raise RuntimeError("disconnect failed")
+
+    monkeypatch.setattr(generate_session, "load_telegram_config", lambda: (123456, "hash"))
+    monkeypatch.setattr(generate_session, "StringSession", lambda: object())
+    monkeypatch.setattr(generate_session, "TelegramClient", FakeTelegramClient)
+
+    await generate_session.main()
+
+    captured = capsys.readouterr()
+    assert created_clients[0].started is True
+    assert created_clients[0].disconnect_calls == 1
+    assert "session-string" in captured.out
+    assert "Telegram cleanup failed: disconnect failed" in captured.err
+
+
+@pytest.mark.asyncio
+async def test_main_propagates_authorization_failure_even_if_disconnect_cleanup_fails(monkeypatch, capsys):
+    created_clients = []
+
+    class FakeTelegramClient:
+        def __init__(self, session, api_id, api_hash):
+            self.started = False
+            self.disconnect_calls = 0
+            created_clients.append(self)
+
+        async def start(self):
+            self.started = True
+
+        async def is_user_authorized(self):
+            return False
+
+        def is_connected(self):
+            return True
+
+        async def disconnect(self):
+            self.disconnect_calls += 1
+            raise RuntimeError("disconnect failed")
+
+    monkeypatch.setattr(generate_session, "load_telegram_config", lambda: (123456, "hash"))
+    monkeypatch.setattr(generate_session, "StringSession", lambda: object())
+    monkeypatch.setattr(generate_session, "TelegramClient", FakeTelegramClient)
+
+    with pytest.raises(RuntimeError, match="Telegram authorization failed"):
+        await generate_session.main()
+
+    captured = capsys.readouterr()
+    assert created_clients[0].started is True
+    assert created_clients[0].disconnect_calls == 1
+    assert "Telegram cleanup failed: disconnect failed" in captured.err

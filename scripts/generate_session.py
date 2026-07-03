@@ -1,5 +1,6 @@
 import asyncio
 import os
+import sys
 
 from dotenv import load_dotenv
 from telethon import TelegramClient
@@ -46,8 +47,11 @@ async def main():
         print("\nTELEGRAM_SESSION_STRING:")
         print(session_string)
     finally:
-        if client.is_connected():
-            await client.disconnect()
+        try:
+            if client.is_connected():
+                await client.disconnect()
+        except Exception as exc:
+            print(f"Telegram cleanup failed: {exc}", file=sys.stderr)
 
 
 if __name__ == "__main__":

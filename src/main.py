@@ -35,6 +35,19 @@ def _format_coin_details(details: dict) -> str:
     return "\n".join(report)
 
 
+async def _disconnect_telegram_client(client):
+    if not client:
+        return False
+
+    try:
+        if client.is_connected():
+            await client.disconnect()
+            return True
+    except Exception as e:
+        print(f"텔레그램 연결 해제 중 오류가 발생했지만 무시합니다: {e}")
+    return False
+
+
 @asynccontextmanager
 async def lifespan(app: FastMCP):
     """
@@ -51,8 +64,7 @@ async def lifespan(app: FastMCP):
             await client.connect()
             if not await client.is_user_authorized():
                 print("텔레그램 인증이 필요합니다. 로컬에서 스크립트를 실행하여 세션 파일을 생성해주세요.")
-                if client.is_connected():
-                    await client.disconnect()
+                await _disconnect_telegram_client(client)
                 telegram_client = None
             else:
                 telegram_client = client
@@ -60,13 +72,12 @@ async def lifespan(app: FastMCP):
         except Exception as e:
             print(f"텔레그램 초기화 실패로 관련 기능이 비활성화됩니다: {e}")
             telegram_client = None
-            if client and client.is_connected():
-                await client.disconnect()
+            await _disconnect_telegram_client(client)
     yield
-    if telegram_client and telegram_client.is_connected():
+    if telegram_client:
         print("Disconnecting from Telegram...")
-        await telegram_client.disconnect()
-        print("텔레그램 클라이언트 연결 해제 완료.")
+        if await _disconnect_telegram_client(telegram_client):
+            print("텔레그램 클라이언트 연결 해제 완료.")
 
 # FastMCP 앱 인스턴스 생성
 mcp = FastMCP("Intelligent Crypto Assistant", lifespan=lifespan)

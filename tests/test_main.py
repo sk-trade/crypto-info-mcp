@@ -96,6 +96,24 @@ class UnauthorizedStartupTelegramClient:
         self.disconnected = True
 
 
+class UnauthorizedStartupDisconnectingTelegramClient:
+    def __init__(self, *args, **kwargs):
+        self.disconnect_calls = 0
+
+    async def connect(self):
+        pass
+
+    async def is_user_authorized(self):
+        return False
+
+    def is_connected(self):
+        return True
+
+    async def disconnect(self):
+        self.disconnect_calls += 1
+        raise RuntimeError("disconnect failed")
+
+
 class FakeMessage:
     def __init__(self, text, date):
         self.text = text
@@ -228,6 +246,22 @@ async def test_lifespan_disconnects_telegram_when_startup_authorization_fails(mo
         assert main_module.telegram_client is None
 
     assert fake_client.disconnected is True
+
+
+@pytest.mark.asyncio
+async def test_lifespan_swallows_disconnect_failure_when_startup_authorization_fails(monkeypatch):
+    main_module.TELEGRAM_API_ID = "123"
+    main_module.TELEGRAM_API_HASH = "hash"
+    main_module.TELEGRAM_SESSION_STRING = "session"
+    fake_client = UnauthorizedStartupDisconnectingTelegramClient()
+
+    monkeypatch.setattr(main_module, "StringSession", lambda session: object())
+    monkeypatch.setattr(main_module, "TelegramClient", lambda *args, **kwargs: fake_client)
+
+    async with main_module.lifespan(None):
+        assert main_module.telegram_client is None
+
+    assert fake_client.disconnect_calls == 1
 
 
 @pytest.mark.asyncio
