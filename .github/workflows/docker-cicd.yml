@@ -54,6 +54,25 @@ jobs:
       - name: Run Docker container
         run: docker run -d -p 8123:8123 --name myapp-container myapp:${{ steps.get_version.outputs.version }}
 
+      - name: Verify Docker container startup
+        run: |
+          for _ in $(seq 1 30); do
+            if docker logs myapp-container 2>&1 | grep -q "Application startup complete"; then
+              docker logs myapp-container
+              exit 0
+            fi
+
+            if [ "$(docker inspect -f '{{.State.Running}}' myapp-container)" != "true" ]; then
+              docker logs myapp-container
+              exit 1
+            fi
+
+            sleep 1
+          done
+
+          docker logs myapp-container
+          exit 1
+
       - name: Cleanup container
         if: always()
         run: |
