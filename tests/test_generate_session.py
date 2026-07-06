@@ -155,3 +155,28 @@ async def test_main_propagates_authorization_failure_even_if_disconnect_cleanup_
     assert created_clients[0].started is True
     assert created_clients[0].disconnect_calls == 1
     assert "Telegram cleanup failed: disconnect failed" in captured.err
+
+
+def test_run_returns_1_without_traceback_when_login_prompt_hits_eof(monkeypatch, capsys):
+    class FakeTelegramClient:
+        def __init__(self, session, api_id, api_hash):
+            pass
+
+        async def start(self):
+            raise EOFError("EOF when reading a line")
+
+        def is_connected(self):
+            return False
+
+    monkeypatch.setattr(generate_session, "load_telegram_config", lambda: (123456, "hash"))
+    monkeypatch.setattr(generate_session, "StringSession", lambda: object())
+    monkeypatch.setattr(generate_session, "TelegramClient", FakeTelegramClient)
+
+    result = generate_session.run()
+    captured = capsys.readouterr()
+
+    assert result == 1
+    assert "Telegram session generation failed:" in captured.err
+    assert "interactive terminal" in captured.err
+    assert "Traceback" not in captured.err
+    assert "EOFError" not in captured.err

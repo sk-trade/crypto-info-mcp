@@ -36,7 +36,14 @@ async def main():
     client = TelegramClient(StringSession(), api_id, api_hash)
     try:
         print("\nStarting Telegram login flow...")
-        await client.start()
+        try:
+            await client.start()
+        except EOFError as exc:
+            raise RuntimeError(
+                "Telegram login requires interactive input. Re-run this command "
+                "in an interactive terminal so Telethon can prompt for your phone, "
+                "login code, or bot token."
+            ) from exc
         if not await client.is_user_authorized():
             raise RuntimeError("Telegram authorization failed; no session string was generated.")
 
@@ -54,5 +61,14 @@ async def main():
             print(f"Telegram cleanup failed: {exc}", file=sys.stderr)
 
 
+def run() -> int:
+    try:
+        asyncio.run(main())
+    except RuntimeError as exc:
+        print(f"Telegram session generation failed: {exc}", file=sys.stderr)
+        return 1
+    return 0
+
+
 if __name__ == "__main__":
-    asyncio.run(main())
+    raise SystemExit(run())
