@@ -151,8 +151,16 @@ class CryptoAssistantClient:
 
     async def cleanup(self):
         """클라이언트 종료 시 연결을 안전하게 해제합니다."""
-        if self._session_context: await self._session_context.__aexit__(None, None, None)
-        if self._streams_context: await self._streams_context.__aexit__(None, None, None)
+        for label, context in (
+            ("세션", self._session_context),
+            ("스트림", self._streams_context),
+        ):
+            if context is None:
+                continue
+            try:
+                await context.__aexit__(None, None, None)
+            except Exception as exc:
+                print(f"⚠️ 클라이언트 정리 경고: {label} 종료 실패: {exc}")
         print("\n👋 클라이언트를 종료합니다.")
 
 async def main() -> int:
