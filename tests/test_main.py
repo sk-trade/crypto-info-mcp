@@ -145,6 +145,17 @@ async def test_market_overview_reports_no_whale_movement_when_telegram_unavailab
 
 
 @pytest.mark.asyncio
+async def test_market_overview_treats_unconfigured_telegram_as_no_whale_movement(monkeypatch):
+    monkeypatch.setattr(main_module, "_fetch_fear_and_greed_index", lambda: _resolved({"value": "55", "value_classification": "Neutral"}))
+    monkeypatch.setattr(main_module, "_fetch_global_market_data", lambda: _resolved({"market_cap_percentage": {"btc": 48.0, "eth": 16.0}}))
+
+    report = await _tool_callable("get_market_overview")()
+
+    assert "포착된 움직임 없음" in report
+    assert "Telegram 조회 실패" not in report
+
+
+@pytest.mark.asyncio
 async def test_market_overview_reports_no_whale_movement_when_no_alerts(monkeypatch):
     monkeypatch.setattr(main_module, "_fetch_fear_and_greed_index", lambda: _resolved({}))
     monkeypatch.setattr(main_module, "_fetch_global_market_data", lambda: _resolved({}))
@@ -277,6 +288,20 @@ async def test_realtime_news_uses_telegram_client(monkeypatch):
 
     assert "지난 1시간 동안의 주요 뉴스" in report
     assert "line1 line2" in report
+
+
+@pytest.mark.asyncio
+async def test_realtime_news_reports_clear_no_news_when_channels_are_empty():
+    main_module.telegram_client = FakeTelegramClient(
+        {
+            "wublockchainenglish": [],
+            "watcherguru": [],
+        }
+    )
+
+    report = await _tool_callable("get_realtime_news")(1)
+
+    assert report == "지난 1시간 동안 지정된 채널에서 새로운 뉴스가 없습니다."
 
 
 @pytest.mark.asyncio

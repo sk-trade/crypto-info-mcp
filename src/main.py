@@ -147,7 +147,14 @@ class TelegramStatus:
 
 async def _fetch_whale_alerts():
     """텔레그램 'whale_alert_io' 채널에서 지난 1시간 동안의 메시지를 가져옵니다."""
-    client = await _get_telegram_client()
+    if not all([TELEGRAM_API_ID, TELEGRAM_API_HASH, TELEGRAM_SESSION_STRING]):
+        return (TelegramStatus.NOT_CONFIGURED, "")
+
+    try:
+        client = await _get_telegram_client()
+    except FastMCPError as e:
+        return (TelegramStatus.AUTH_FAILED, str(e))
+
     messages_text = []
     since = datetime.now(timezone.utc) - timedelta(hours=1)
     try:
@@ -199,7 +206,9 @@ async def get_market_overview() -> str:
         status, data = whale_result
         if status == TelegramStatus.FETCH_FAILED:
             report.append("- 주요 자금 이동: Telegram 조회 실패로 확인 불가")
-        elif status == TelegramStatus.NO_MESSAGES and not data:
+        elif status == TelegramStatus.AUTH_FAILED:
+            report.append("- 주요 자금 이동: Telegram 조회 실패로 확인 불가")
+        elif status in (TelegramStatus.NOT_CONFIGURED, TelegramStatus.NO_MESSAGES) and not data:
             report.append("- 주요 자금 이동: 포착된 움직임 없음")
         elif isinstance(data, list) and data:
             report.append("- 주요 자금 이동 (지난 1시간):")
@@ -302,8 +311,9 @@ async def get_realtime_news(hours: int = 1) -> str:
             channel_statuses[ch] = "알 수 없는 오류"
 
     all_messages.sort(key=lambda m: m["date"], reverse=True)
+    failed_channels = {ch: status for ch, status in channel_statuses.items() if "실패" in status}
 
-    if not all_messages and not channel_statuses:
+    if not all_messages and not failed_channels:
         return f"지난 {hours}시간 동안 지정된 채널에서 새로운 뉴스가 없습니다."
 
     report = [f"지난 {hours}시간 동안의 주요 뉴스:"]
@@ -315,7 +325,6 @@ async def get_realtime_news(hours: int = 1) -> str:
             f"{msg['preview']}{trunc}"
         )
 
-    failed_channels = {ch: status for ch, status in channel_statuses.items() if "실패" in status}
     if failed_channels:
         report.append("")
         report.append("조회 실패 채널:")
