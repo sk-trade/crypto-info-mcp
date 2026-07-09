@@ -12,7 +12,7 @@ load_dotenv()
 
 # API 키 및 설정 로드
 COINGECKO_API_KEY = os.getenv("COINGECKO_API_KEY")
-TELEGRAM_API_ID = int(os.getenv("TELEGRAM_API_ID"))
+TELEGRAM_API_ID = os.getenv("TELEGRAM_API_ID")
 TELEGRAM_API_HASH = os.getenv("TELEGRAM_API_HASH")
 SESSION_NAME = 'telegram_session'
 TARGET_CHANNELS = ['wublockchainenglish', 'watcherguru']
@@ -30,7 +30,7 @@ def print_json(data):
 
 # --- API 테스트 함수들 ---
 
-def test_coingecko_api():
+def check_coingecko_api():
     """CoinGecko API를 테스트하여 특정 코인 정보를 가져옵니다."""
     print_header("1. CoinGecko API 테스트 (시장 데이터)")
     if not COINGECKO_API_KEY:
@@ -58,7 +58,7 @@ def test_coingecko_api():
     except requests.exceptions.RequestException as e:
         print(f"❌ CoinGecko API 호출 실패: {e}")
 
-async def test_telegram_news_api(client: TelegramClient):
+async def check_telegram_news_api(client: TelegramClient):
     """Telegram API를 테스트하여 지정된 채널에서 최신 뉴스를 가져옵니다."""
     print_header("2. Telegram API 테스트 (실시간 뉴스)")
     hours = 24  # 지난 24시간 동안의 뉴스 검색
@@ -88,7 +88,7 @@ async def test_telegram_news_api(client: TelegramClient):
 
         await asyncio.sleep(1) # API 요청 제한을 피하기 위한 채널 간 딜레이
 
-def test_alternative_me_api():
+def check_alternative_me_api():
     """Alternative.me API를 테스트하여 '공포 및 탐욕 지수'를 가져옵니다."""
     print_header("3. Alternative.me API 테스트 (공포/탐욕 지수)")
     url = "https://api.alternative.me/fng/?limit=1"
@@ -112,12 +112,15 @@ def test_alternative_me_api():
 
 async def main():
     """모든 API 테스트를 순차적으로 실행하는 메인 비동기 함수입니다."""
-    test_coingecko_api()
+    check_coingecko_api()
     time.sleep(1)
-    test_alternative_me_api()
+    check_alternative_me_api()
 
-    async with TelegramClient(SESSION_NAME, TELEGRAM_API_ID, TELEGRAM_API_HASH) as client:
-        await test_telegram_news_api(client)
+    if not TELEGRAM_API_ID or not TELEGRAM_API_HASH:
+        raise RuntimeError("TELEGRAM_API_ID and TELEGRAM_API_HASH are required.")
+
+    async with TelegramClient(SESSION_NAME, int(TELEGRAM_API_ID), TELEGRAM_API_HASH) as client:
+        await check_telegram_news_api(client)
 
 if __name__ == "__main__":
     # 처음 실행 시 텔레그램 인증(전화번호, 코드 입력)이 필요할 수 있습니다.
