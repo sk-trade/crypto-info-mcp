@@ -151,12 +151,7 @@ async def _fetch_whale_alerts():
     messages_text = []
     since = datetime.now(timezone.utc) - timedelta(hours=1)
     try:
-        async for message in client.iter_messages('whale_alert_io', limit=5):
-            if not message.date:
-                continue
-            msg_date = message.date.astimezone(timezone.utc)
-            if msg_date < since:
-                break
+        async for message in client.iter_messages('whale_alert_io', offset_date=since, reverse=True, limit=5):
             if message.text:
                 messages_text.append(message.text)
     except Exception as e:
@@ -192,6 +187,14 @@ async def get_market_overview() -> str:
 
     if isinstance(whale_result, Exception):
         report.append("- 주요 자금 이동: Telegram 조회 실패로 확인 불가")
+    elif isinstance(whale_result, list):
+        if whale_result:
+            report.append("- 주요 자금 이동 (지난 1시간):")
+            for alert in whale_result:
+                cleaned_alert = alert.replace('\n', ' ').strip()
+                report.append(f"  - {cleaned_alert}")
+        else:
+            report.append("- 주요 자금 이동: 포착된 움직임 없음")
     elif isinstance(whale_result, tuple) and len(whale_result) == 2:
         status, data = whale_result
         if status == TelegramStatus.FETCH_FAILED:
@@ -258,12 +261,7 @@ async def get_realtime_news(hours: int = 1) -> str:
         messages = []
         errors = []
         try:
-            async for msg in client.iter_messages(ch, limit=10):
-                if not msg.date:
-                    continue
-                msg_date = msg.date.astimezone(timezone.utc)
-                if msg_date < since:
-                    break
+            async for msg in client.iter_messages(ch, offset_date=since, reverse=True, limit=10):
                 if msg.text:
                     preview = msg.text.replace('\n', ' ').strip()
                     if len(preview) > 150:
@@ -273,9 +271,9 @@ async def get_realtime_news(hours: int = 1) -> str:
                         truncated = False
                     messages.append({
                         "channel": ch,
-                        "message_id": msg.id,
-                        "date": msg_date,
-                        "timestamp": msg_date.strftime('%m-%d %H:%M UTC'),
+                        "message_id": getattr(msg, "id", None),
+                        "date": getattr(msg, "date", since).astimezone(timezone.utc) if getattr(msg, "date", None) else since,
+                        "timestamp": getattr(msg, "date", since).astimezone(timezone.utc).strftime('%m-%d %H:%M UTC') if getattr(msg, "date", None) else since.strftime('%m-%d %H:%M UTC'),
                         "preview": preview,
                         "truncated": truncated,
                     })
@@ -311,8 +309,9 @@ async def get_realtime_news(hours: int = 1) -> str:
     report = [f"지난 {hours}시간 동안의 주요 뉴스:"]
     for msg in all_messages:
         trunc = " (원문 참조 필요)" if msg["truncated"] else ""
+        message_id = f" #{msg['message_id']}" if msg["message_id"] is not None else ""
         report.append(
-            f"- [{msg['timestamp']}] @{msg['channel']} #{msg['message_id']} / "
+            f"- [{msg['timestamp']}] @{msg['channel']}{message_id} / "
             f"{msg['preview']}{trunc}"
         )
 
