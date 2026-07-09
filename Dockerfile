@@ -1,6 +1,6 @@
 FROM debian:bookworm-slim
 
-ARG VERSION
+ARG VERSION=local
 ENV VERSION=${VERSION}
 
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /bin/uv

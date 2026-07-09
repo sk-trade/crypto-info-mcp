@@ -5,8 +5,6 @@ import argparse
 import asyncio
 from typing import Optional, Dict, Any, List
 
-import google.generativeai as genai
-from google.generativeai.types import FunctionDeclaration, Tool
 from dotenv import load_dotenv
 
 from mcp import ClientSession
@@ -15,8 +13,22 @@ from mcp.client.streamable_http import streamablehttp_client
 # .env 파일에서 환경 변수 로드
 load_dotenv()
 
-# Gemini API 키 설정
-genai.configure(api_key=os.getenv("GOOGLE_API_KEY", ''))
+
+def _load_gemini():
+    try:
+        import google.generativeai as genai
+        from google.generativeai.types import FunctionDeclaration, Tool
+    except ModuleNotFoundError as exc:
+        if exc.name and exc.name.split(".")[0] == "google":
+            raise RuntimeError(
+                "Gemini client dependency is missing. Install it with "
+                "`uv run --with google-generativeai python example/client.py --host localhost --port 8123` "
+                "or add `google-generativeai` to your development dependencies."
+            ) from exc
+        raise
+
+    genai.configure(api_key=os.getenv("GOOGLE_API_KEY", ""))
+    return genai, FunctionDeclaration, Tool
 
 class CryptoAssistantClient:
     """
@@ -24,8 +36,9 @@ class CryptoAssistantClient:
     Gemini를 사용하여 사용자의 질문을 이해하고 서버의 도구를 호출합니다.
     """
     def __init__(self):
+        self._genai, self._FunctionDeclaration, self._Tool = _load_gemini()
         self.session: Optional[ClientSession] = None
-        self.model = genai.GenerativeModel(
+        self.model = self._genai.GenerativeModel(
             'gemini-2.5-flash', 
             system_instruction="당신은 친절하고 전문적인 암호화폐 시장 분석가입니다. 사용자의 질문에 답하기 위해 사용 가능한 도구를 활용하세요."
         )
@@ -58,7 +71,7 @@ class CryptoAssistantClient:
             return [self._remove_keys_recursively(item, keys_to_remove) for item in obj]
         return obj
 
-    def _mcp_tools_to_gemini_tools(self, mcp_tools: list) -> list[Tool]:
+    def _mcp_tools_to_gemini_tools(self, mcp_tools: list) -> list[Any]:
         """MCP 도구 스키마를 Gemini가 이해할 수 있는 형식으로 변환합니다."""
         gemini_tools = []
         # Gemini API와 호환되지 않아 제거해야 할 스키마 필드 목록
@@ -68,12 +81,12 @@ class CryptoAssistantClient:
             # 재귀 함수를 사용해 불필요한 키들을 제거
             gemini_compatible_schema = self._remove_keys_recursively(tool.inputSchema, keys_to_remove)
 
-            function_declaration = FunctionDeclaration(
+            function_declaration = self._FunctionDeclaration(
                 name=tool.name,
                 description=tool.description,
                 parameters=gemini_compatible_schema,
             )
-            gemini_tools.append(Tool(function_declarations=[function_declaration]))
+            gemini_tools.append(self._Tool(function_declarations=[function_declaration]))
         return gemini_tools
 
     async def process_query(self, query: str) -> str:
@@ -138,11 +151,19 @@ class CryptoAssistantClient:
 
     async def cleanup(self):
         """클라이언트 종료 시 연결을 안전하게 해제합니다."""
-        if self._session_context: await self._session_context.__aexit__(None, None, None)
-        if self._streams_context: await self._streams_context.__aexit__(None, None, None)
+        for label, context in (
+            ("세션", self._session_context),
+            ("스트림", self._streams_context),
+        ):
+            if context is None:
+                continue
+            try:
+                await context.__aexit__(None, None, None)
+            except Exception as exc:
+                print(f"⚠️ 클라이언트 정리 경고: {label} 종료 실패: {exc}")
         print("\n👋 클라이언트를 종료합니다.")
 
-async def main():
+async def main() -> int:
     """스크립트 실행 시 인자를 파싱하고 클라이언트를 시작합니다."""
     parser = argparse.ArgumentParser(description="Client for Intelligent Crypto Assistant MCP server.")
     parser.add_argument("--host", type=str, default="localhost", help="The hostname or IP address.")
@@ -150,17 +171,21 @@ async def main():
     args = parser.parse_args()
 
     server_url = f"http://{args.host}:{args.port}/mcp/"
-    client = CryptoAssistantClient()
+    client = None
 
     try:
+        client = CryptoAssistantClient()
         await client.connect(server_url)
         await client.chat_loop()
+        return 0
     except KeyboardInterrupt:
-        pass 
+        return 0
     except Exception as e:
         print(f"클라이언트 시작 중 심각한 오류 발생: {e}")
+        return 1
     finally:
-        await client.cleanup()
+        if client is not None:
+            await client.cleanup()
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    raise SystemExit(asyncio.run(main()))
