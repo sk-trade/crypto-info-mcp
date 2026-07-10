@@ -4,6 +4,7 @@ import importlib.util
 from pathlib import Path
 import subprocess
 import sys
+from types import SimpleNamespace
 
 import pytest
 
@@ -71,3 +72,77 @@ def test_main_returns_1_when_cleanup_raises_after_connect_failure(monkeypatch, c
     assert "클라이언트 시작 중 심각한 오류 발생: connect failed" in captured.out
     assert "⚠️ 클라이언트 정리 경고: 세션 종료 실패: cleanup failed" in captured.out
     assert "Traceback" not in captured.err
+
+
+def test_process_query_handles_multiple_consecutive_tool_call_turns(monkeypatch):
+    class FakeSession:
+        def __init__(self):
+            self.calls = []
+
+        async def list_tools(self):
+            return SimpleNamespace(tools=[])
+
+        async def call_tool(self, name, arguments):
+            self.calls.append((name, arguments))
+            return SimpleNamespace(content=[SimpleNamespace(text=f"{name} result")])
+
+    class FakeChat:
+        def __init__(self):
+            self.messages = []
+            self.responses = [
+                _response(_function_call("market", {"region": "kr"}), _function_call("news", {})),
+                _response(_function_call("details", {"coin_id": "bitcoin"})),
+                _response(text="final answer"),
+            ]
+
+        def send_message(self, message, **kwargs):
+            self.messages.append((message, kwargs))
+            return self.responses.pop(0)
+
+    client = object.__new__(example_client.CryptoAssistantClient)
+    client.session = FakeSession()
+    client.chat = FakeChat()
+    client._mcp_tools_to_gemini_tools = lambda tools: []
+
+    answer = asyncio.run(client.process_query("시장 분석"))
+
+    assert answer == "final answer"
+    assert client.session.calls == [
+        ("market", {"region": "kr"}),
+        ("news", {}),
+        ("details", {"coin_id": "bitcoin"}),
+    ]
+    assert len(client.chat.messages) == 3
+    assert len(client.chat.messages[1][0]) == 2
+
+
+def test_process_query_stops_after_bounded_tool_call_turns():
+    class FakeSession:
+        async def list_tools(self):
+            return SimpleNamespace(tools=[])
+
+        async def call_tool(self, name, arguments):
+            return SimpleNamespace(content=[SimpleNamespace(text="result")])
+
+    class FakeChat:
+        def send_message(self, message, **kwargs):
+            return _response(_function_call("loop", {}))
+
+    client = object.__new__(example_client.CryptoAssistantClient)
+    client.session = FakeSession()
+    client.chat = FakeChat()
+    client._mcp_tools_to_gemini_tools = lambda tools: []
+
+    with pytest.raises(RuntimeError, match="more than 5 consecutive"):
+        asyncio.run(client.process_query("계속 호출"))
+
+
+def _function_call(name, arguments):
+    return SimpleNamespace(name=name, args=arguments)
+
+
+def _response(*function_calls, text=""):
+    return SimpleNamespace(
+        parts=[SimpleNamespace(function_call=function_call) for function_call in function_calls],
+        text=text,
+    )

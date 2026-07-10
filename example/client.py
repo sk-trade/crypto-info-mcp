@@ -13,6 +13,8 @@ from mcp.client.streamable_http import streamablehttp_client
 # .env 파일에서 환경 변수 로드
 load_dotenv()
 
+MAX_TOOL_CALL_TURNS = 5
+
 
 def _load_gemini():
     try:
@@ -104,30 +106,37 @@ class CryptoAssistantClient:
         print("...Gemini에게 질문을 보내는 중...")
         response = self.chat.send_message(query, tools=available_tools)
 
-        response_part = response.parts[0]
-        if response_part.function_call:
-            fc = response_part.function_call
-            tool_name = fc.name
-            tool_args = dict(fc.args)
+        for _ in range(MAX_TOOL_CALL_TURNS):
+            function_calls = [
+                part.function_call
+                for part in getattr(response, "parts", [])
+                if getattr(part, "function_call", None)
+            ]
+            if not function_calls:
+                return response.text
 
-            print(f"🛠️ Gemini가 도구 호출을 요청합니다: {tool_name}({tool_args})")
-            tool_result_mcp = await self.session.call_tool(tool_name, tool_args)
-            print("...도구 실행 결과를 Gemini에게 다시 보내는 중...")
+            function_responses = []
+            for function_call in function_calls:
+                tool_name = function_call.name
+                tool_args = dict(function_call.args)
+                print(f"🛠️ Gemini가 도구 호출을 요청합니다: {tool_name}({tool_args})")
+                tool_result_mcp = await self.session.call_tool(tool_name, tool_args)
 
-            # MCP 서버의 응답(Streamable)에서 실제 텍스트 내용을 추출
-            tool_response_content = ""
-            if isinstance(tool_result_mcp.content, list) and tool_result_mcp.content:
-                tool_response_content = tool_result_mcp.content[0].text
-
-            # 추출한 결과를 Gemini에 전달하여 최종 답변 생성
-            response = self.chat.send_message(
-                [{"function_response": {
+                # Preserve the existing text contract; result normalization is handled separately.
+                tool_response_content = ""
+                if isinstance(tool_result_mcp.content, list) and tool_result_mcp.content:
+                    tool_response_content = tool_result_mcp.content[0].text
+                function_responses.append({"function_response": {
                     "name": tool_name,
                     "response": {"content": tool_response_content},
-                }}]
-            )
+                }})
 
-        return response.text
+            print("...도구 실행 결과를 Gemini에게 다시 보내는 중...")
+            response = self.chat.send_message(function_responses)
+
+        raise RuntimeError(
+            f"Gemini requested more than {MAX_TOOL_CALL_TURNS} consecutive tool-call turns."
+        )
 
     async def chat_loop(self):
         """사용자와 상호작용하는 메인 채팅 루프입니다."""
