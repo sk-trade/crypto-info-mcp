@@ -92,11 +92,15 @@ async def lifespan(app: FastMCP):
             print(f"텔레그램 초기화 실패로 관련 기능이 비활성화됩니다: {e}")
             telegram_client = None
             await _disconnect_telegram_client(client)
-    yield
-    if telegram_client:
-        print("Disconnecting from Telegram...")
-        if await _disconnect_telegram_client(telegram_client):
-            print("텔레그램 클라이언트 연결 해제 완료.")
+    try:
+        yield
+    finally:
+        client = telegram_client
+        telegram_client = None
+        if client:
+            print("Disconnecting from Telegram...")
+            if await _disconnect_telegram_client(client):
+                print("텔레그램 클라이언트 연결 해제 완료.")
 
 # FastMCP 앱 인스턴스 생성
 mcp = FastMCP("Intelligent Crypto Assistant", lifespan=lifespan)

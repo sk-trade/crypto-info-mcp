@@ -126,6 +126,26 @@ class UnauthorizedStartupDisconnectingTelegramClient:
         raise RuntimeError("disconnect failed")
 
 
+class AuthorizedStartupTelegramClient:
+    def __init__(self, disconnect_fails=False):
+        self.disconnect_fails = disconnect_fails
+        self.disconnected = False
+
+    async def connect(self):
+        pass
+
+    async def is_user_authorized(self):
+        return True
+
+    def is_connected(self):
+        return True
+
+    async def disconnect(self):
+        self.disconnected = True
+        if self.disconnect_fails:
+            raise RuntimeError("disconnect failed")
+
+
 class FakeMessage:
     def __init__(self, text, date):
         self.text = text
@@ -303,6 +323,38 @@ async def test_lifespan_swallows_disconnect_failure_when_startup_authorization_f
         assert main_module.telegram_client is None
 
     assert fake_client.disconnect_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_lifespan_disconnects_authorized_client_and_clears_reference(monkeypatch):
+    main_module.TELEGRAM_API_ID = "123"
+    main_module.TELEGRAM_API_HASH = "hash"
+    main_module.TELEGRAM_SESSION_STRING = "session"
+    fake_client = AuthorizedStartupTelegramClient()
+    monkeypatch.setattr(main_module, "StringSession", lambda session: object())
+    monkeypatch.setattr(main_module, "TelegramClient", lambda *args, **kwargs: fake_client)
+
+    async with main_module.lifespan(None):
+        assert main_module.telegram_client is fake_client
+
+    assert fake_client.disconnected is True
+    assert main_module.telegram_client is None
+
+
+@pytest.mark.asyncio
+async def test_lifespan_clears_reference_when_authorized_cleanup_fails(monkeypatch):
+    main_module.TELEGRAM_API_ID = "123"
+    main_module.TELEGRAM_API_HASH = "hash"
+    main_module.TELEGRAM_SESSION_STRING = "session"
+    fake_client = AuthorizedStartupTelegramClient(disconnect_fails=True)
+    monkeypatch.setattr(main_module, "StringSession", lambda session: object())
+    monkeypatch.setattr(main_module, "TelegramClient", lambda *args, **kwargs: fake_client)
+
+    async with main_module.lifespan(None):
+        assert main_module.telegram_client is fake_client
+
+    assert fake_client.disconnected is True
+    assert main_module.telegram_client is None
 
 
 @pytest.mark.asyncio
