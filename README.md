@@ -18,7 +18,7 @@ Set these in `.env` before starting the service:
 - `TELEGRAM_SESSION_STRING` - required to read Telegram channels.
 - `VERSION` - optional Docker image tag; defaults to `local` in Docker Compose.
 
-If Telegram variables are missing, market overview still works and reports no whale movement.
+If Telegram variables are missing, market overview still works and clearly reports that whale-alert data is unavailable because Telegram is not configured.
 
 ## Local run
 
