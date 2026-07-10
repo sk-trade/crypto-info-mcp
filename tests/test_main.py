@@ -260,6 +260,39 @@ async def test_coin_details_formats_successful_response(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_coin_details_formats_null_and_empty_optional_fields(monkeypatch):
+    main_module.COINGECKO_API_KEY = "test-key"
+    response = FakeResponse(
+        {
+            "name": "Unknown coin",
+            "symbol": None,
+            "market_cap_rank": None,
+            "market_data": {"current_price": {"krw": None}},
+            "links": {"homepage": []},
+        }
+    )
+    monkeypatch.setattr(main_module.httpx, "AsyncClient", lambda: FakeAsyncClient(response))
+
+    report = await _tool_callable("get_coin_details")("unknown")
+
+    assert "Unknown coin" in report
+    assert "(N/A)" in report
+    assert "현재 가격: None" in report
+    assert "홈페이지: N/A" in report
+
+
+@pytest.mark.asyncio
+async def test_coin_details_formats_null_links(monkeypatch):
+    main_module.COINGECKO_API_KEY = "test-key"
+    response = FakeResponse({"name": "Unknown coin", "links": None})
+    monkeypatch.setattr(main_module.httpx, "AsyncClient", lambda: FakeAsyncClient(response))
+
+    report = await _tool_callable("get_coin_details")("unknown")
+
+    assert "홈페이지: N/A" in report
+
+
+@pytest.mark.asyncio
 async def test_coin_details_maps_missing_coin_to_clear_error(monkeypatch):
     main_module.COINGECKO_API_KEY = "test-key"
     response = FakeResponse({}, status_code=404)

@@ -44,12 +44,16 @@ telegram_client = None
 
 def _format_coin_details(details: dict) -> str:
     price_krw = details.get('market_data', {}).get('current_price', {}).get('krw', 'N/A')
+    symbol = details.get('symbol') or 'N/A'
+    links = details.get('links') or {}
+    homepage = links.get('homepage') if isinstance(links, dict) else None
+    homepage_url = homepage[0] if isinstance(homepage, list) and homepage and homepage[0] else 'N/A'
 
     report = [
-        f"'{details.get('name', 'N/A')}' ({details.get('symbol', 'N/A').upper()}) 상세 정보:",
+        f"'{details.get('name') or 'N/A'}' ({str(symbol).upper()}) 상세 정보:",
         f"- 시가총액 순위: {details.get('market_cap_rank', 'N/A')}위",
         f"- 현재 가격: ₩{price_krw:,}" if isinstance(price_krw, (int, float)) else f"- 현재 가격: {price_krw}",
-        f"- 홈페이지: {details.get('links', {}).get('homepage', ['N/A'])[0]}"
+        f"- 홈페이지: {homepage_url}"
     ]
     return "\n".join(report)
 
