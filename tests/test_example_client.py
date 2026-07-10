@@ -137,6 +137,45 @@ def test_process_query_stops_after_bounded_tool_call_turns():
         asyncio.run(client.process_query("계속 호출"))
 
 
+def test_process_query_forwards_all_mcp_content_blocks_and_error_state():
+    class FakeSession:
+        async def list_tools(self):
+            return SimpleNamespace(tools=[])
+
+        async def call_tool(self, name, arguments):
+            return SimpleNamespace(
+                content=[
+                    SimpleNamespace(type="text", text="first"),
+                    SimpleNamespace(type="text", text="second"),
+                ],
+                isError=True,
+            )
+
+    class FakeChat:
+        def __init__(self):
+            self.messages = []
+            self.responses = [_response(_function_call("news", {})), _response(text="final")]
+
+        def send_message(self, message, **kwargs):
+            self.messages.append(message)
+            return self.responses.pop(0)
+
+    client = object.__new__(example_client.CryptoAssistantClient)
+    client.session = FakeSession()
+    client.chat = FakeChat()
+    client._mcp_tools_to_gemini_tools = lambda tools: []
+
+    assert asyncio.run(client.process_query("뉴스")) == "final"
+    response = client.chat.messages[1][0]["function_response"]["response"]
+    assert response == {
+        "content": [
+            {"type": "text", "text": "first"},
+            {"type": "text", "text": "second"},
+        ],
+        "isError": True,
+    }
+
+
 def _function_call(name, arguments):
     return SimpleNamespace(name=name, args=arguments)
 

@@ -32,6 +32,21 @@ def _load_gemini():
     genai.configure(api_key=os.getenv("GOOGLE_API_KEY", ""))
     return genai, FunctionDeclaration, Tool
 
+
+def _tool_result_response(tool_result: Any) -> dict[str, Any]:
+    """Convert every MCP content block into Gemini-safe structured response data."""
+    content = []
+    for block in getattr(tool_result, "content", []) or []:
+        if hasattr(block, "model_dump"):
+            content.append(block.model_dump(mode="json", exclude_none=True))
+        else:
+            content.append({
+                "type": getattr(block, "type", "text"),
+                "text": getattr(block, "text", str(block)),
+            })
+    return {"content": content, "isError": bool(getattr(tool_result, "isError", False))}
+
+
 class CryptoAssistantClient:
     """
     'Intelligent Crypto Assistant' MCP 서버와 통신하는 클라이언트 클래스.
@@ -122,13 +137,9 @@ class CryptoAssistantClient:
                 print(f"🛠️ Gemini가 도구 호출을 요청합니다: {tool_name}({tool_args})")
                 tool_result_mcp = await self.session.call_tool(tool_name, tool_args)
 
-                # Preserve the existing text contract; result normalization is handled separately.
-                tool_response_content = ""
-                if isinstance(tool_result_mcp.content, list) and tool_result_mcp.content:
-                    tool_response_content = tool_result_mcp.content[0].text
                 function_responses.append({"function_response": {
                     "name": tool_name,
-                    "response": {"content": tool_response_content},
+                    "response": _tool_result_response(tool_result_mcp),
                 }})
 
             print("...도구 실행 결과를 Gemini에게 다시 보내는 중...")
