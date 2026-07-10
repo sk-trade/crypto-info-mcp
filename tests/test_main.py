@@ -1,4 +1,5 @@
 import importlib.util
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import httpx
@@ -63,6 +64,17 @@ class FakeTelegramClient:
 
     def is_connected(self):
         return True
+
+
+class RecordingTelegramClient(FakeTelegramClient):
+    def __init__(self, messages_by_channel):
+        super().__init__(messages_by_channel)
+        self.calls = []
+
+    async def iter_messages(self, channel, **kwargs):
+        self.calls.append((channel, kwargs))
+        async for message in super().iter_messages(channel, **kwargs):
+            yield message
 
 
 class FailingStartupTelegramClient:
@@ -291,6 +303,59 @@ async def test_realtime_news_uses_telegram_client(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_realtime_news_returns_newest_messages_and_stops_before_since():
+    now = datetime.now(timezone.utc)
+    client = RecordingTelegramClient(
+        {
+            "wublockchainenglish": [
+                FakeMessage("newest", now - timedelta(minutes=5)),
+                FakeMessage("older than window", now - timedelta(hours=2)),
+            ],
+            "watcherguru": [
+                FakeMessage("also recent", now - timedelta(minutes=10)),
+                FakeMessage("too old", now - timedelta(hours=3)),
+            ],
+        }
+    )
+    main_module.telegram_client = client
+
+    report = await _tool_callable("get_realtime_news")(1)
+
+    assert "newest" in report
+    assert "also recent" in report
+    assert "older than window" not in report
+    assert "too old" not in report
+    assert report.index("newest") < report.index("also recent")
+    assert client.calls == [
+        ("wublockchainenglish", {"limit": 10}),
+        ("watcherguru", {"limit": 10}),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_whale_alerts_return_newest_messages_and_stop_before_since(monkeypatch):
+    now = datetime.now(timezone.utc)
+    client = RecordingTelegramClient(
+        {
+            "whale_alert_io": [
+                FakeMessage("recent whale", now - timedelta(minutes=5)),
+                FakeMessage("expired whale", now - timedelta(hours=2)),
+            ]
+        }
+    )
+    monkeypatch.setattr(main_module, "TELEGRAM_API_ID", 1)
+    monkeypatch.setattr(main_module, "TELEGRAM_API_HASH", "hash")
+    monkeypatch.setattr(main_module, "TELEGRAM_SESSION_STRING", "session")
+    main_module.telegram_client = client
+
+    status, alerts = await main_module._fetch_whale_alerts()
+
+    assert status == main_module.TelegramStatus.OK
+    assert alerts == ["recent whale"]
+    assert client.calls == [("whale_alert_io", {"limit": 5})]
+
+
+@pytest.mark.asyncio
 async def test_realtime_news_reports_clear_no_news_when_channels_are_empty():
     main_module.telegram_client = FakeTelegramClient(
         {
@@ -318,6 +383,4 @@ def _resolved(value):
 
 
 def _dt():
-    from datetime import datetime, timezone
-
-    return datetime(2026, 6, 18, 0, 0, tzinfo=timezone.utc)
+    return datetime.now(timezone.utc)

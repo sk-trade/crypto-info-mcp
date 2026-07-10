@@ -145,6 +145,18 @@ class TelegramStatus:
     OK = "ok"
 
 
+def _is_before_since(message, since: datetime) -> bool:
+    """Return whether a Telegram message is older than the requested UTC window."""
+    message_date = getattr(message, "date", None)
+    if message_date is None:
+        return False
+    if message_date.tzinfo is None:
+        message_date = message_date.replace(tzinfo=timezone.utc)
+    else:
+        message_date = message_date.astimezone(timezone.utc)
+    return message_date < since
+
+
 async def _fetch_whale_alerts():
     """텔레그램 'whale_alert_io' 채널에서 지난 1시간 동안의 메시지를 가져옵니다."""
     if not all([TELEGRAM_API_ID, TELEGRAM_API_HASH, TELEGRAM_SESSION_STRING]):
@@ -158,7 +170,10 @@ async def _fetch_whale_alerts():
     messages_text = []
     since = datetime.now(timezone.utc) - timedelta(hours=1)
     try:
-        async for message in client.iter_messages('whale_alert_io', offset_date=since, reverse=True, limit=5):
+        # Telethon's default iteration is newest first, so the first older post ends the window.
+        async for message in client.iter_messages('whale_alert_io', limit=5):
+            if _is_before_since(message, since):
+                break
             if message.text:
                 messages_text.append(message.text)
     except Exception as e:
@@ -270,7 +285,10 @@ async def get_realtime_news(hours: int = 1) -> str:
         messages = []
         errors = []
         try:
-            async for msg in client.iter_messages(ch, offset_date=since, reverse=True, limit=10):
+            # Request newest posts first and stop at the first one outside the time window.
+            async for msg in client.iter_messages(ch, limit=10):
+                if _is_before_since(msg, since):
+                    break
                 if msg.text:
                     preview = msg.text.replace('\n', ' ').strip()
                     if len(preview) > 150:
