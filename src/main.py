@@ -222,9 +222,11 @@ async def get_market_overview() -> str:
         if status == TelegramStatus.FETCH_FAILED:
             report.append("- 주요 자금 이동: Telegram 조회 실패로 확인 불가")
         elif status == TelegramStatus.AUTH_FAILED:
-            report.append("- 주요 자금 이동: Telegram 조회 실패로 확인 불가")
-        elif status in (TelegramStatus.NOT_CONFIGURED, TelegramStatus.NO_MESSAGES) and not data:
-            report.append("- 주요 자금 이동: 포착된 움직임 없음")
+            report.append("- 주요 자금 이동: Telegram 인증에 실패하여 확인 불가")
+        elif status == TelegramStatus.NOT_CONFIGURED:
+            report.append("- 주요 자금 이동: Telegram이 설정되지 않아 확인 불가")
+        elif status == TelegramStatus.NO_MESSAGES:
+            report.append("- 주요 자금 이동: 최근 1시간 내 포착된 움직임 없음")
         elif isinstance(data, list) and data:
             report.append("- 주요 자금 이동 (지난 1시간):")
             for alert in data:

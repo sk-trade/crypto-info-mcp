@@ -163,8 +163,26 @@ async def test_market_overview_treats_unconfigured_telegram_as_no_whale_movement
 
     report = await _tool_callable("get_market_overview")()
 
-    assert "포착된 움직임 없음" in report
-    assert "Telegram 조회 실패" not in report
+    assert "Telegram이 설정되지 않아 확인 불가" in report
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("status", "expected"),
+    [
+        (main_module.TelegramStatus.AUTH_FAILED, "Telegram 인증에 실패하여 확인 불가"),
+        (main_module.TelegramStatus.FETCH_FAILED, "Telegram 조회 실패로 확인 불가"),
+        (main_module.TelegramStatus.NO_MESSAGES, "최근 1시간 내 포착된 움직임 없음"),
+    ],
+)
+async def test_market_overview_distinguishes_telegram_availability_states(monkeypatch, status, expected):
+    monkeypatch.setattr(main_module, "_fetch_fear_and_greed_index", lambda: _resolved({}))
+    monkeypatch.setattr(main_module, "_fetch_global_market_data", lambda: _resolved({}))
+    monkeypatch.setattr(main_module, "_fetch_whale_alerts", lambda: _resolved((status, "failure detail")))
+
+    report = await _tool_callable("get_market_overview")()
+
+    assert expected in report
 
 
 @pytest.mark.asyncio
