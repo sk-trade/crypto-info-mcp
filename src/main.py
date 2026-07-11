@@ -316,9 +316,11 @@ async def get_coin_details(coin_id: str) -> str:
     except httpx.HTTPStatusError as e:
         if e.response.status_code == 404:
             raise FastMCPError(f"'{coin_id}' 코인을 찾을 수 없습니다. ID를 확인해주세요.")
-        raise FastMCPError(f"'{coin_id}' 정보 조회 중 API 에러 발생: {e}")
+        print(f"CoinGecko coin detail HTTP error for {coin_id}: {e}")
+        raise FastMCPError(f"'{coin_id}' 정보 조회 중 CoinGecko API 오류가 발생했습니다.")
     except Exception as e:
-        raise FastMCPError(f"'{coin_id}' 정보를 가져오는 데 실패했습니다: {e}")
+        print(f"CoinGecko coin detail fetch error for {coin_id}: {e}")
+        raise FastMCPError(f"'{coin_id}' 정보를 가져오는 데 실패했습니다.")
 
 @mcp.tool()
 async def get_realtime_news(hours: int = 1) -> str:
@@ -364,7 +366,8 @@ async def get_realtime_news(hours: int = 1) -> str:
                         "truncated": truncated,
                     })
         except Exception as e:
-            errors.append(str(e))
+            print(f"Telegram news fetch error for {ch}: {e}")
+            errors.append("채널을 조회할 수 없습니다.")
         return messages, errors
 
     tasks = [fetch_for_channel(ch) for ch in channels]
@@ -376,7 +379,8 @@ async def get_realtime_news(hours: int = 1) -> str:
     for i, result in enumerate(results):
         ch = channels[i]
         if isinstance(result, Exception):
-            channel_statuses[ch] = f"조회 실패: {result}"
+            print(f"Telegram news task error for {ch}: {result}")
+            channel_statuses[ch] = "조회 실패: 채널을 조회할 수 없습니다."
         elif isinstance(result, tuple) and len(result) == 2:
             msgs, errors = result
             all_messages.extend(msgs)
@@ -438,7 +442,8 @@ async def get_telegram_message(channel: str, message_id: int) -> str:
     except FastMCPError:
         raise
     except Exception as e:
-        raise FastMCPError(f"메시지 조회 중 오류 발생: {e}")
+        print(f"Telegram message fetch error for {channel}#{message_id}: {e}")
+        raise FastMCPError("메시지 조회 중 Telegram 오류가 발생했습니다.")
 
 
 if __name__ == "__main__":

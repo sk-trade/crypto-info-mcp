@@ -602,7 +602,24 @@ async def test_realtime_news_preserves_results_when_one_channel_fails():
 
     assert "available news" in report
     assert "조회 실패 채널" in report
-    assert "@watcherguru: 조회 실패: channel unavailable" in report
+    assert "@watcherguru: 조회 실패: 채널을 조회할 수 없습니다." in report
+    assert "channel unavailable" not in report
+
+
+@pytest.mark.asyncio
+async def test_realtime_news_does_not_expose_unbounded_channel_errors():
+    class FailingTelegramClient:
+        async def iter_messages(self, channel, **kwargs):
+            raise RuntimeError("e" * 100_000)
+            yield
+
+    main_module.telegram_client = FailingTelegramClient()
+
+    report = await _tool_callable("get_realtime_news")(1)
+
+    assert report.count("채널을 조회할 수 없습니다.") == 2
+    assert "e" * 1_000 not in report
+    assert len(report) < 1_000
 
 
 @pytest.mark.asyncio
@@ -701,7 +718,7 @@ async def test_telegram_message_wraps_upstream_failure():
 
     main_module.telegram_client = FailingMessageClient()
 
-    with pytest.raises(main_module.FastMCPError, match="메시지 조회 중 오류 발생"):
+    with pytest.raises(main_module.FastMCPError, match="메시지 조회 중 Telegram 오류"):
         await _tool_callable("get_telegram_message")("watcherguru", 42)
 
 
