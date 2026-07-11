@@ -297,6 +297,22 @@ async def test_market_overview_bounds_whale_alert_text(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_market_overview_bounds_fear_and_greed_fields(monkeypatch):
+    monkeypatch.setattr(
+        main_module,
+        "_fetch_fear_and_greed_index",
+        lambda: _resolved({"value": "1" * 100_000, "value_classification": "x" * 100_000}),
+    )
+    monkeypatch.setattr(main_module, "_fetch_global_market_data", lambda: _resolved({}))
+    monkeypatch.setattr(main_module, "_fetch_whale_alerts", lambda: _resolved([]))
+
+    report = await _tool_callable("get_market_overview")()
+
+    assert report.count("...") == 2
+    assert len(report) < 1_000
+
+
+@pytest.mark.asyncio
 async def test_coin_details_requires_api_key():
     with pytest.raises(main_module.FastMCPError, match="CoinGecko API 키"):
         await _tool_callable("get_coin_details")("bitcoin")
@@ -389,6 +405,28 @@ async def test_coin_details_formats_null_links(monkeypatch):
     report = await _tool_callable("get_coin_details")("unknown")
 
     assert "홈페이지: N/A" in report
+
+
+@pytest.mark.asyncio
+async def test_coin_details_bounds_and_validates_upstream_fields(monkeypatch):
+    main_module.COINGECKO_API_KEY = "test-key"
+    response = FakeResponse(
+        {
+            "name": "n" * 100_000,
+            "symbol": "s" * 100_000,
+            "market_cap_rank": "first",
+            "market_data": {"current_price": {"krw": "1" * 100_000}},
+            "links": {"homepage": ["https://example.com/" + "x" * 100_000]},
+        }
+    )
+    monkeypatch.setattr(main_module.httpx, "AsyncClient", lambda: FakeAsyncClient(response))
+
+    report = await _tool_callable("get_coin_details")("bounded")
+
+    assert "시가총액 순위: N/A위" in report
+    assert "현재 가격: N/A" in report
+    assert report.count("...") == 3
+    assert len(report) < 1_000
 
 
 @pytest.mark.asyncio

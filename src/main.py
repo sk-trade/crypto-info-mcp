@@ -41,22 +41,39 @@ ALLOWED_TELEGRAM_CHANNELS = {
 
 telegram_client = None
 WHALE_ALERT_MAX_CHARS = 300
+MARKET_LABEL_MAX_CHARS = 100
+COIN_NAME_MAX_CHARS = 120
+COIN_SYMBOL_MAX_CHARS = 20
+HOMEPAGE_MAX_CHARS = 500
+
+
+def _bounded_text(value, max_chars: int, default: str = 'N/A') -> str:
+    if not isinstance(value, (str, int, float)) or isinstance(value, bool):
+        return default
+    text = str(value).replace('\n', ' ').strip()
+    if not text:
+        return default
+    if len(text) <= max_chars:
+        return text
+    return text[:max_chars - 3].rstrip() + "..."
 
 
 def _format_coin_details(details: dict) -> str:
     market_data = details.get('market_data') or {}
     current_price = market_data.get('current_price') if isinstance(market_data, dict) else {}
     price_krw = current_price.get('krw', 'N/A') if isinstance(current_price, dict) else 'N/A'
-    if price_krw is None:
+    if not isinstance(price_krw, (int, float)) or isinstance(price_krw, bool):
         price_krw = 'N/A'
-    symbol = details.get('symbol') or 'N/A'
-    market_cap_rank = details.get('market_cap_rank') or 'N/A'
+    symbol = _bounded_text(details.get('symbol'), COIN_SYMBOL_MAX_CHARS)
+    market_cap_rank = details.get('market_cap_rank')
+    if not isinstance(market_cap_rank, int) or isinstance(market_cap_rank, bool) or market_cap_rank < 1:
+        market_cap_rank = 'N/A'
     links = details.get('links') or {}
     homepage = links.get('homepage') if isinstance(links, dict) else None
-    homepage_url = homepage[0] if isinstance(homepage, list) and homepage and homepage[0] else 'N/A'
+    homepage_url = _bounded_text(homepage[0], HOMEPAGE_MAX_CHARS) if isinstance(homepage, list) and homepage else 'N/A'
 
     report = [
-        f"'{details.get('name') or 'N/A'}' ({str(symbol).upper()}) 상세 정보:",
+        f"'{_bounded_text(details.get('name'), COIN_NAME_MAX_CHARS)}' ({symbol.upper()}) 상세 정보:",
         f"- 시가총액 순위: {market_cap_rank}위",
         f"- 현재 가격: ₩{price_krw:,}" if isinstance(price_krw, (int, float)) else f"- 현재 가격: {price_krw}",
         f"- 홈페이지: {homepage_url}"
@@ -236,7 +253,9 @@ async def get_market_overview() -> str:
 
     report = ["현재 시장 개요 브리핑:"]
     if isinstance(fng_data, dict) and fng_data:
-        report.append(f"- 시장 심리: '{fng_data.get('value_classification', 'N/A')}' (지수: {fng_data.get('value', 'N/A')})")
+        classification = _bounded_text(fng_data.get('value_classification'), MARKET_LABEL_MAX_CHARS)
+        value = _bounded_text(fng_data.get('value'), MARKET_LABEL_MAX_CHARS)
+        report.append(f"- 시장 심리: '{classification}' (지수: {value})")
 
     if isinstance(global_data, dict) and global_data and 'market_cap_percentage' in global_data:
         percentages = global_data['market_cap_percentage']
