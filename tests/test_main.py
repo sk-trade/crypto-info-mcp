@@ -332,6 +332,21 @@ async def test_coin_details_rejects_missing_coin_id_without_request(monkeypatch,
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("coin_id", ["x" * 201, "bitcoin/market", "bitcoin?x=1", "-bitcoin", "bitcoin-"])
+async def test_coin_details_rejects_unsafe_or_oversized_coin_id_without_request(monkeypatch, coin_id):
+    class _FailingAsyncClient:
+        def __init__(self):
+            raise AssertionError("CoinGecko request should not be created")
+
+    monkeypatch.setattr(main_module.httpx, "AsyncClient", lambda: _FailingAsyncClient())
+
+    with pytest.raises(main_module.FastMCPError, match="200자 이하") as error:
+        await _tool_callable("get_coin_details")(coin_id)
+
+    assert coin_id not in str(error.value)
+
+
+@pytest.mark.asyncio
 async def test_coin_details_strips_coin_id_before_request(monkeypatch):
     main_module.COINGECKO_API_KEY = "test-key"
     requested_urls = []

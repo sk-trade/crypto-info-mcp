@@ -1,6 +1,7 @@
 import asyncio
 from contextlib import asynccontextmanager
 import os
+import re
 from datetime import datetime, timedelta, timezone
 
 import httpx
@@ -45,6 +46,8 @@ MARKET_LABEL_MAX_CHARS = 100
 COIN_NAME_MAX_CHARS = 120
 COIN_SYMBOL_MAX_CHARS = 20
 HOMEPAGE_MAX_CHARS = 500
+COIN_ID_MAX_CHARS = 200
+COIN_ID_PATTERN = re.compile(r"^[A-Za-z0-9]+(?:-[A-Za-z0-9]+)*$")
 
 
 def _bounded_text(value, max_chars: int, default: str = 'N/A') -> str:
@@ -302,6 +305,8 @@ async def get_coin_details(coin_id: str) -> str:
     if not coin_id or not coin_id.strip():
         raise FastMCPError("CoinGecko 코인 ID를 입력해주세요.")
     coin_id = coin_id.strip()
+    if len(coin_id) > COIN_ID_MAX_CHARS or not COIN_ID_PATTERN.fullmatch(coin_id):
+        raise FastMCPError("CoinGecko 코인 ID는 영문, 숫자, 하이픈으로 구성된 200자 이하의 값이어야 합니다.")
     if not COINGECKO_API_KEY:
         raise FastMCPError("서버에 CoinGecko API 키가 설정되지 않았습니다.")
     try:
