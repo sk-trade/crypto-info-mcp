@@ -242,6 +242,20 @@ async def test_market_overview_reports_no_whale_movement_when_no_alerts(monkeypa
 
 
 @pytest.mark.asyncio
+async def test_market_overview_bounds_whale_alert_text(monkeypatch):
+    monkeypatch.setattr(main_module, "_fetch_fear_and_greed_index", lambda: _resolved({}))
+    monkeypatch.setattr(main_module, "_fetch_global_market_data", lambda: _resolved({}))
+    monkeypatch.setattr(main_module, "_fetch_whale_alerts", lambda: _resolved(["x" * 100_000]))
+
+    report = await _tool_callable("get_market_overview")()
+
+    alert_line = report.splitlines()[-1]
+    assert alert_line.endswith("...")
+    assert len(alert_line.removeprefix("  - ")) == main_module.WHALE_ALERT_MAX_CHARS
+    assert len(report) < 1_000
+
+
+@pytest.mark.asyncio
 async def test_coin_details_requires_api_key():
     with pytest.raises(main_module.FastMCPError, match="CoinGecko API 키"):
         await _tool_callable("get_coin_details")("bitcoin")

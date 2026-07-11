@@ -40,6 +40,7 @@ ALLOWED_TELEGRAM_CHANNELS = {
 }
 
 telegram_client = None
+WHALE_ALERT_MAX_CHARS = 300
 
 
 def _format_coin_details(details: dict) -> str:
@@ -67,6 +68,13 @@ def _format_percentage(value) -> str:
     if isinstance(value, (int, float)) and not isinstance(value, bool):
         return f"{value:.1f}%"
     return "N/A"
+
+
+def _format_whale_alert(value: str) -> str:
+    cleaned = value.replace('\n', ' ').strip()
+    if len(cleaned) <= WHALE_ALERT_MAX_CHARS:
+        return cleaned
+    return cleaned[:WHALE_ALERT_MAX_CHARS - 3].rstrip() + "..."
 
 
 async def _disconnect_telegram_client(client):
@@ -237,8 +245,7 @@ async def get_market_overview() -> str:
         if whale_result:
             report.append("- 주요 자금 이동 (지난 1시간):")
             for alert in whale_result:
-                cleaned_alert = alert.replace('\n', ' ').strip()
-                report.append(f"  - {cleaned_alert}")
+                report.append(f"  - {_format_whale_alert(alert)}")
         else:
             report.append("- 주요 자금 이동: 포착된 움직임 없음")
     elif isinstance(whale_result, tuple) and len(whale_result) == 2:
@@ -254,8 +261,7 @@ async def get_market_overview() -> str:
         elif isinstance(data, list) and data:
             report.append("- 주요 자금 이동 (지난 1시간):")
             for alert in data:
-                cleaned_alert = alert.replace('\n', ' ').strip()
-                report.append(f"  - {cleaned_alert}")
+                report.append(f"  - {_format_whale_alert(alert)}")
         else:
             report.append("- 주요 자금 이동: 포착된 움직임 없음")
     else:
