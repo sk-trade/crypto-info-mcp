@@ -43,19 +43,30 @@ telegram_client = None
 
 
 def _format_coin_details(details: dict) -> str:
-    price_krw = details.get('market_data', {}).get('current_price', {}).get('krw', 'N/A')
+    market_data = details.get('market_data') or {}
+    current_price = market_data.get('current_price') if isinstance(market_data, dict) else {}
+    price_krw = current_price.get('krw', 'N/A') if isinstance(current_price, dict) else 'N/A'
+    if price_krw is None:
+        price_krw = 'N/A'
     symbol = details.get('symbol') or 'N/A'
+    market_cap_rank = details.get('market_cap_rank') or 'N/A'
     links = details.get('links') or {}
     homepage = links.get('homepage') if isinstance(links, dict) else None
     homepage_url = homepage[0] if isinstance(homepage, list) and homepage and homepage[0] else 'N/A'
 
     report = [
         f"'{details.get('name') or 'N/A'}' ({str(symbol).upper()}) 상세 정보:",
-        f"- 시가총액 순위: {details.get('market_cap_rank', 'N/A')}위",
+        f"- 시가총액 순위: {market_cap_rank}위",
         f"- 현재 가격: ₩{price_krw:,}" if isinstance(price_krw, (int, float)) else f"- 현재 가격: {price_krw}",
         f"- 홈페이지: {homepage_url}"
     ]
     return "\n".join(report)
+
+
+def _format_percentage(value) -> str:
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return f"{value:.1f}%"
+    return "N/A"
 
 
 async def _disconnect_telegram_client(client):
@@ -214,9 +225,11 @@ async def get_market_overview() -> str:
         report.append(f"- 시장 심리: '{fng_data.get('value_classification', 'N/A')}' (지수: {fng_data.get('value', 'N/A')})")
 
     if not isinstance(global_data, Exception) and global_data and 'market_cap_percentage' in global_data:
-        btc_dom = global_data['market_cap_percentage'].get('btc', 0)
-        eth_dom = global_data['market_cap_percentage'].get('eth', 0)
-        report.append(f"- 시장 지배력: BTC {btc_dom:.1f}%, ETH {eth_dom:.1f}%")
+        percentages = global_data['market_cap_percentage']
+        if isinstance(percentages, dict):
+            btc_dom = _format_percentage(percentages.get('btc'))
+            eth_dom = _format_percentage(percentages.get('eth'))
+            report.append(f"- 시장 지배력: BTC {btc_dom}, ETH {eth_dom}")
 
     if isinstance(whale_result, Exception):
         report.append("- 주요 자금 이동: Telegram 조회 실패로 확인 불가")

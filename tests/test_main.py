@@ -206,6 +206,31 @@ async def test_market_overview_distinguishes_telegram_availability_states(monkey
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("percentages", "expected"),
+    [
+        ({"btc": None, "eth": "unknown"}, "BTC N/A, ETH N/A"),
+        (None, None),
+    ],
+)
+async def test_market_overview_tolerates_incomplete_dominance_payload(monkeypatch, percentages, expected):
+    monkeypatch.setattr(main_module, "_fetch_fear_and_greed_index", lambda: _resolved({}))
+    monkeypatch.setattr(
+        main_module,
+        "_fetch_global_market_data",
+        lambda: _resolved({"market_cap_percentage": percentages}),
+    )
+    monkeypatch.setattr(main_module, "_fetch_whale_alerts", lambda: _resolved([]))
+
+    report = await _tool_callable("get_market_overview")()
+
+    if expected is None:
+        assert "시장 지배력" not in report
+    else:
+        assert expected in report
+
+
+@pytest.mark.asyncio
 async def test_market_overview_reports_no_whale_movement_when_no_alerts(monkeypatch):
     monkeypatch.setattr(main_module, "_fetch_fear_and_greed_index", lambda: _resolved({}))
     monkeypatch.setattr(main_module, "_fetch_global_market_data", lambda: _resolved({}))
@@ -295,14 +320,15 @@ async def test_coin_details_formats_null_and_empty_optional_fields(monkeypatch):
 
     assert "Unknown coin" in report
     assert "(N/A)" in report
-    assert "현재 가격: None" in report
+    assert "시가총액 순위: N/A위" in report
+    assert "현재 가격: N/A" in report
     assert "홈페이지: N/A" in report
 
 
 @pytest.mark.asyncio
 async def test_coin_details_formats_null_links(monkeypatch):
     main_module.COINGECKO_API_KEY = "test-key"
-    response = FakeResponse({"name": "Unknown coin", "links": None})
+    response = FakeResponse({"name": "Unknown coin", "links": None, "market_data": None})
     monkeypatch.setattr(main_module.httpx, "AsyncClient", lambda: FakeAsyncClient(response))
 
     report = await _tool_callable("get_coin_details")("unknown")
