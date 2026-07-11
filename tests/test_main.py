@@ -478,6 +478,63 @@ async def test_realtime_news_errors_when_telegram_disabled():
         await _tool_callable("get_realtime_news")(1)
 
 
+@pytest.mark.asyncio
+async def test_telegram_message_rejects_disallowed_channel_before_client_lookup():
+    with pytest.raises(main_module.FastMCPError, match="허용되지 않은 채널"):
+        await _tool_callable("get_telegram_message")("not-allowed", 1)
+
+
+@pytest.mark.asyncio
+async def test_telegram_message_rejects_non_positive_message_id_before_client_lookup():
+    with pytest.raises(main_module.FastMCPError, match="1 이상의 정수"):
+        await _tool_callable("get_telegram_message")("watcherguru", 0)
+
+
+@pytest.mark.asyncio
+async def test_telegram_message_returns_full_text():
+    class FakeMessageClient:
+        async def get_messages(self, channel, ids):
+            assert channel == "watcherguru"
+            assert ids == 42
+            return FakeMessage("full message", _dt())
+
+    main_module.telegram_client = FakeMessageClient()
+
+    result = await _tool_callable("get_telegram_message")("watcherguru", 42)
+
+    assert result == "full message"
+
+
+@pytest.mark.asyncio
+async def test_telegram_message_reports_missing_and_non_text_messages():
+    class FakeMessageClient:
+        def __init__(self, message):
+            self.message = message
+
+        async def get_messages(self, channel, ids):
+            return self.message
+
+    main_module.telegram_client = FakeMessageClient(None)
+    with pytest.raises(main_module.FastMCPError, match="찾을 수 없습니다"):
+        await _tool_callable("get_telegram_message")("watcherguru", 42)
+
+    main_module.telegram_client = FakeMessageClient(FakeMessage(None, _dt()))
+    with pytest.raises(main_module.FastMCPError, match="텍스트 콘텐츠"):
+        await _tool_callable("get_telegram_message")("watcherguru", 42)
+
+
+@pytest.mark.asyncio
+async def test_telegram_message_wraps_upstream_failure():
+    class FailingMessageClient:
+        async def get_messages(self, channel, ids):
+            raise RuntimeError("telegram unavailable")
+
+    main_module.telegram_client = FailingMessageClient()
+
+    with pytest.raises(main_module.FastMCPError, match="메시지 조회 중 오류 발생"):
+        await _tool_callable("get_telegram_message")("watcherguru", 42)
+
+
 def _resolved(value):
     async def _inner():
         return value

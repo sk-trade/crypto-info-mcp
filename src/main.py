@@ -374,6 +374,8 @@ async def get_telegram_message(channel: str, message_id: int) -> str:
     if channel not in ALLOWED_TELEGRAM_CHANNELS:
         allowed = ", ".join(sorted(ALLOWED_TELEGRAM_CHANNELS))
         raise FastMCPError(f"허용되지 않은 채널입니다. 허용 채널: {allowed}")
+    if message_id < 1:
+        raise FastMCPError("'message_id' 파라미터는 1 이상의 정수여야 합니다.")
 
     client = await _get_telegram_client()
 

@@ -6,7 +6,10 @@ A FastMCP service for crypto market summaries, CoinGecko coin details, and recen
 
 - `get_market_overview` - combines Fear & Greed, CoinGecko global market data, and whale alerts when Telegram is configured.
 - `get_coin_details(coin_id)` - returns CoinGecko details for a coin ID such as `bitcoin`.
-- `get_realtime_news(hours=1)` - collects recent posts from the configured Telegram channels.
+- `get_realtime_news(hours=1)` - lists bounded previews of recent posts from the configured Telegram channels.
+- `get_telegram_message(channel, message_id)` - retrieves the full text for a listed Telegram post from an allowlisted channel.
+
+Use the `channel` and `message_id` shown by `get_realtime_news` when calling `get_telegram_message`. Supported channels are `watcherguru`, `wublockchainenglish`, and `whale_alert_io`; message IDs must be positive integers.
 
 ## Environment variables
 
