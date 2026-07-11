@@ -231,6 +231,47 @@ async def test_market_overview_tolerates_incomplete_dominance_payload(monkeypatc
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("fng_data", "global_data"),
+    [
+        ("unexpected", {}),
+        ({}, "market_cap_percentage"),
+        ({}, ["market_cap_percentage"]),
+    ],
+)
+async def test_market_overview_ignores_malformed_helper_results(monkeypatch, fng_data, global_data):
+    monkeypatch.setattr(main_module, "_fetch_fear_and_greed_index", lambda: _resolved(fng_data))
+    monkeypatch.setattr(main_module, "_fetch_global_market_data", lambda: _resolved(global_data))
+    monkeypatch.setattr(main_module, "_fetch_whale_alerts", lambda: _resolved([]))
+
+    report = await _tool_callable("get_market_overview")()
+
+    assert report.startswith("현재 시장 개요 브리핑:")
+    assert "포착된 움직임 없음" in report
+
+
+@pytest.mark.asyncio
+async def test_fetch_helpers_reject_malformed_data_shapes(monkeypatch):
+    responses = iter(
+        [
+            FakeResponse({"data": "unexpected"}),
+            FakeResponse({"data": ["unexpected"]}),
+            FakeResponse({"data": "market_cap_percentage"}),
+        ]
+    )
+    monkeypatch.setattr(
+        main_module.httpx,
+        "AsyncClient",
+        lambda: FakeAsyncClient(next(responses)),
+    )
+    main_module.COINGECKO_API_KEY = "test-key"
+
+    assert await main_module._fetch_fear_and_greed_index() == {}
+    assert await main_module._fetch_fear_and_greed_index() == {}
+    assert await main_module._fetch_global_market_data() == {}
+
+
+@pytest.mark.asyncio
 async def test_market_overview_reports_no_whale_movement_when_no_alerts(monkeypatch):
     monkeypatch.setattr(main_module, "_fetch_fear_and_greed_index", lambda: _resolved({}))
     monkeypatch.setattr(main_module, "_fetch_global_market_data", lambda: _resolved({}))

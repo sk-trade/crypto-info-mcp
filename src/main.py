@@ -144,7 +144,11 @@ async def _fetch_fear_and_greed_index():
         async with httpx.AsyncClient() as client:
             response = await client.get("https://api.alternative.me/fng/?limit=1", timeout=10)
             response.raise_for_status()
-            return response.json().get('data', [{}])[0]
+            payload = response.json()
+            data = payload.get('data') if isinstance(payload, dict) else None
+            if isinstance(data, list) and data and isinstance(data[0], dict):
+                return data[0]
+            return {}
     except Exception as e:
         print(f"Fear & Greed Index Fetch Error: {e}")
         return {}
@@ -158,7 +162,9 @@ async def _fetch_global_market_data():
         async with httpx.AsyncClient() as client:
             response = await client.get(url, headers=headers, timeout=10)
             response.raise_for_status()
-            return response.json().get('data', {})
+            payload = response.json()
+            data = payload.get('data') if isinstance(payload, dict) else None
+            return data if isinstance(data, dict) else {}
     except Exception as e:
         print(f"Global Market Data Fetch Error: {e}")
         return {}
@@ -229,10 +235,10 @@ async def get_market_overview() -> str:
     )
 
     report = ["현재 시장 개요 브리핑:"]
-    if not isinstance(fng_data, Exception) and fng_data:
+    if isinstance(fng_data, dict) and fng_data:
         report.append(f"- 시장 심리: '{fng_data.get('value_classification', 'N/A')}' (지수: {fng_data.get('value', 'N/A')})")
 
-    if not isinstance(global_data, Exception) and global_data and 'market_cap_percentage' in global_data:
+    if isinstance(global_data, dict) and global_data and 'market_cap_percentage' in global_data:
         percentages = global_data['market_cap_percentage']
         if isinstance(percentages, dict):
             btc_dom = _format_percentage(percentages.get('btc'))
