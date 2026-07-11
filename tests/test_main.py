@@ -225,8 +225,6 @@ async def test_coin_details_requires_api_key():
 @pytest.mark.asyncio
 @pytest.mark.parametrize("coin_id", ["", "   "])
 async def test_coin_details_rejects_missing_coin_id_without_request(monkeypatch, coin_id):
-    main_module.COINGECKO_API_KEY = "test-key"
-
     class _FailingAsyncClient:
         def __init__(self):
             raise AssertionError("CoinGecko request should not be created")
@@ -235,6 +233,26 @@ async def test_coin_details_rejects_missing_coin_id_without_request(monkeypatch,
 
     with pytest.raises(main_module.FastMCPError, match="CoinGecko 코인 ID"):
         await _tool_callable("get_coin_details")(coin_id)
+
+
+@pytest.mark.asyncio
+async def test_coin_details_strips_coin_id_before_request(monkeypatch):
+    main_module.COINGECKO_API_KEY = "test-key"
+    requested_urls = []
+
+    class RecordingAsyncClient(FakeAsyncClient):
+        async def get(self, url, **kwargs):
+            requested_urls.append(url)
+            return await super().get(url, **kwargs)
+
+    response = FakeResponse({"name": "Bitcoin", "symbol": "btc"})
+    monkeypatch.setattr(main_module.httpx, "AsyncClient", lambda: RecordingAsyncClient(response))
+
+    await _tool_callable("get_coin_details")("  bitcoin  ")
+
+    assert requested_urls == [
+        "https://api.coingecko.com/api/v3/coins/bitcoin?localization=false&tickers=false&community_data=false&developer_data=false"
+    ]
 
 
 @pytest.mark.asyncio

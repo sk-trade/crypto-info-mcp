@@ -252,10 +252,11 @@ async def get_coin_details(coin_id: str) -> str:
     """
     특정 암호화폐의 상세 정보를 제공합니다. CoinGecko ID(예: 'bitcoin')를 입력해야 합니다.
     """
-    if not COINGECKO_API_KEY:
-        raise FastMCPError("서버에 CoinGecko API 키가 설정되지 않았습니다.")
     if not coin_id or not coin_id.strip():
         raise FastMCPError("CoinGecko 코인 ID를 입력해주세요.")
+    coin_id = coin_id.strip()
+    if not COINGECKO_API_KEY:
+        raise FastMCPError("서버에 CoinGecko API 키가 설정되지 않았습니다.")
     try:
         url = f"https://api.coingecko.com/api/v3/coins/{coin_id}?localization=false&tickers=false&community_data=false&developer_data=false"
         headers = {'x-cg-demo-api-key': COINGECKO_API_KEY}
