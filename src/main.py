@@ -158,11 +158,14 @@ def _is_before_since(message, since: datetime) -> bool:
     message_date = getattr(message, "date", None)
     if message_date is None:
         return False
-    if message_date.tzinfo is None:
-        message_date = message_date.replace(tzinfo=timezone.utc)
-    else:
-        message_date = message_date.astimezone(timezone.utc)
-    return message_date < since
+    return _as_utc(message_date) < since
+
+
+def _as_utc(value: datetime) -> datetime:
+    """Normalize Telegram datetimes without depending on the server timezone."""
+    if value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc)
 
 
 async def _fetch_whale_alerts():
@@ -301,6 +304,7 @@ async def get_realtime_news(hours: int = 1) -> str:
                 if _is_before_since(msg, since):
                     break
                 if msg.text:
+                    message_date = _as_utc(msg.date) if getattr(msg, "date", None) else since
                     preview = msg.text.replace('\n', ' ').strip()
                     if len(preview) > 150:
                         preview = preview[:147] + "..."
@@ -310,8 +314,8 @@ async def get_realtime_news(hours: int = 1) -> str:
                     messages.append({
                         "channel": ch,
                         "message_id": getattr(msg, "id", None),
-                        "date": getattr(msg, "date", since).astimezone(timezone.utc) if getattr(msg, "date", None) else since,
-                        "timestamp": getattr(msg, "date", since).astimezone(timezone.utc).strftime('%m-%d %H:%M UTC') if getattr(msg, "date", None) else since.strftime('%m-%d %H:%M UTC'),
+                        "date": message_date,
+                        "timestamp": message_date.strftime('%m-%d %H:%M UTC'),
                         "preview": preview,
                         "truncated": truncated,
                     })

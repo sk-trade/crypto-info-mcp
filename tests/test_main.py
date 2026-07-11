@@ -454,6 +454,39 @@ async def test_realtime_news_returns_newest_messages_and_stops_before_since():
 
 
 @pytest.mark.asyncio
+async def test_realtime_news_normalizes_naive_dates_as_utc():
+    naive_date = datetime.now(timezone.utc).replace(tzinfo=None, microsecond=0)
+    main_module.telegram_client = FakeTelegramClient(
+        {
+            "wublockchainenglish": [FakeMessage("naive timestamp", naive_date)],
+            "watcherguru": [],
+        }
+    )
+
+    report = await _tool_callable("get_realtime_news")(1)
+
+    assert naive_date.strftime("%m-%d %H:%M UTC") in report
+    assert "naive timestamp" in report
+
+
+@pytest.mark.asyncio
+async def test_realtime_news_preserves_results_when_one_channel_fails():
+    class PartiallyFailingTelegramClient:
+        async def iter_messages(self, channel, **kwargs):
+            if channel == "watcherguru":
+                raise RuntimeError("channel unavailable")
+            yield FakeMessage("available news", _dt())
+
+    main_module.telegram_client = PartiallyFailingTelegramClient()
+
+    report = await _tool_callable("get_realtime_news")(1)
+
+    assert "available news" in report
+    assert "조회 실패 채널" in report
+    assert "@watcherguru: 조회 실패: channel unavailable" in report
+
+
+@pytest.mark.asyncio
 async def test_whale_alerts_return_newest_messages_and_stop_before_since(monkeypatch):
     now = datetime.now(timezone.utc)
     client = RecordingTelegramClient(
