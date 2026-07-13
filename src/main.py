@@ -3,6 +3,7 @@ from contextlib import asynccontextmanager
 import os
 import re
 from datetime import datetime, timedelta, timezone
+from typing import Annotated
 
 import httpx
 from dotenv import load_dotenv
@@ -11,7 +12,7 @@ from telethon.sessions import StringSession
 
 from fastmcp import FastMCP
 from fastmcp.exceptions import FastMCPError
-from pydantic import StrictInt
+from pydantic import Field, StrictInt
 
 # --- 설정 및 전역 변수 초기화 ---
 load_dotenv()
@@ -40,11 +41,17 @@ ALLOWED_TELEGRAM_CHANNELS = {
     "watcherguru",
     "whale_alert_io",
 }
+TelegramChannel = Annotated[
+    str,
+    Field(json_schema_extra={"enum": sorted(ALLOWED_TELEGRAM_CHANNELS)}),
+]
 TELEGRAM_UNAVAILABLE_MESSAGE = (
     "텔레그램을 사용할 수 없습니다. 서버 운영자는 TELEGRAM_API_ID, "
     "TELEGRAM_API_HASH, TELEGRAM_SESSION_STRING 설정과 "
     "`uv run python scripts/generate_session.py`로 생성한 인증 세션을 확인해주세요."
 )
+TELEGRAM_OPERATION_TIMEOUT_SECONDS = 10
+TELEGRAM_CLEANUP_TIMEOUT_SECONDS = 5
 
 telegram_client = None
 WHALE_ALERT_MAX_CHARS = 300
@@ -53,7 +60,23 @@ COIN_NAME_MAX_CHARS = 120
 COIN_SYMBOL_MAX_CHARS = 20
 HOMEPAGE_MAX_CHARS = 500
 COIN_ID_MAX_CHARS = 200
-COIN_ID_PATTERN = re.compile(r"^[A-Za-z0-9]+(?:-[A-Za-z0-9]+)*$")
+COIN_ID_PATTERN = re.compile(r"^[A-Za-z0-9_-]+$")
+CoinGeckoId = Annotated[
+    str,
+    Field(json_schema_extra={
+        "minLength": 1,
+        "maxLength": COIN_ID_MAX_CHARS,
+        "pattern": COIN_ID_PATTERN.pattern,
+    }),
+]
+NewsHours = Annotated[
+    StrictInt,
+    Field(json_schema_extra={"minimum": 1, "maximum": 72}),
+]
+TelegramMessageId = Annotated[
+    StrictInt,
+    Field(json_schema_extra={"minimum": 1}),
+]
 
 
 def _bounded_text(value, max_chars: int, default: str = 'N/A') -> str:
@@ -109,8 +132,11 @@ async def _disconnect_telegram_client(client):
 
     try:
         if client.is_connected():
-            await client.disconnect()
+            async with asyncio.timeout(TELEGRAM_CLEANUP_TIMEOUT_SECONDS):
+                await client.disconnect()
             return True
+    except TimeoutError:
+        print("텔레그램 연결 해제 시간이 초과되었지만 무시합니다.")
     except Exception as e:
         print(f"텔레그램 연결 해제 중 오류가 발생했지만 무시합니다: {e}")
     return False
@@ -129,14 +155,20 @@ async def lifespan(app: FastMCP):
         try:
             print("Connecting to Telegram...")
             client = TelegramClient(StringSession(TELEGRAM_SESSION_STRING), TELEGRAM_API_ID, TELEGRAM_API_HASH)
-            await client.connect()
-            if not await client.is_user_authorized():
+            async with asyncio.timeout(TELEGRAM_OPERATION_TIMEOUT_SECONDS):
+                await client.connect()
+                is_authorized = await client.is_user_authorized()
+            if not is_authorized:
                 print("텔레그램 인증이 필요합니다. 로컬에서 스크립트를 실행하여 세션 파일을 생성해주세요.")
                 await _disconnect_telegram_client(client)
                 telegram_client = None
             else:
                 telegram_client = client
                 print("텔레그램 클라이언트 연결 완료.")
+        except TimeoutError:
+            print("텔레그램 초기화 시간이 초과되어 관련 기능이 비활성화됩니다.")
+            telegram_client = None
+            await _disconnect_telegram_client(client)
         except Exception as e:
             print(f"텔레그램 초기화 실패로 관련 기능이 비활성화됩니다: {e}")
             telegram_client = None
@@ -233,11 +265,15 @@ async def _fetch_whale_alerts():
     since = datetime.now(timezone.utc) - timedelta(hours=1)
     try:
         # Telethon's default iteration is newest first, so the first older post ends the window.
-        async for message in client.iter_messages('whale_alert_io', limit=5):
-            if _is_before_since(message, since):
-                break
-            if message.text:
-                messages_text.append(message.text)
+        async with asyncio.timeout(TELEGRAM_OPERATION_TIMEOUT_SECONDS):
+            async for message in client.iter_messages('whale_alert_io', limit=5):
+                if _is_before_since(message, since):
+                    break
+                if message.text:
+                    messages_text.append(message.text)
+    except TimeoutError:
+        print("Whale Alert fetch timed out.")
+        return (TelegramStatus.FETCH_FAILED, "timeout")
     except Exception as e:
         print(f"Whale Alert Fetch Error: {e}")
         return (TelegramStatus.FETCH_FAILED, str(e))
@@ -304,7 +340,7 @@ async def get_market_overview() -> str:
     return "\n".join(report)
 
 @mcp.tool()
-async def get_coin_details(coin_id: str) -> str:
+async def get_coin_details(coin_id: CoinGeckoId) -> str:
     """
     특정 암호화폐의 상세 정보를 제공합니다. CoinGecko ID(예: 'bitcoin')를 입력해야 합니다.
     """
@@ -312,7 +348,7 @@ async def get_coin_details(coin_id: str) -> str:
         raise FastMCPError("CoinGecko 코인 ID를 입력해주세요.")
     coin_id = coin_id.strip()
     if len(coin_id) > COIN_ID_MAX_CHARS or not COIN_ID_PATTERN.fullmatch(coin_id):
-        raise FastMCPError("CoinGecko 코인 ID는 영문, 숫자, 하이픈으로 구성된 200자 이하의 값이어야 합니다.")
+        raise FastMCPError("CoinGecko 코인 ID는 영문, 숫자, 밑줄, 하이픈으로 구성된 200자 이하의 값이어야 합니다.")
     if not COINGECKO_API_KEY:
         raise FastMCPError(
             "서버에 CoinGecko API 키(COINGECKO_API_KEY)가 설정되지 않았습니다."
@@ -336,7 +372,7 @@ async def get_coin_details(coin_id: str) -> str:
         raise FastMCPError(f"'{coin_id}' 정보를 가져오는 데 실패했습니다.")
 
 @mcp.tool()
-async def get_realtime_news(hours: StrictInt = 1) -> str:
+async def get_realtime_news(hours: NewsHours = 1) -> str:
     """
     주요 텔레그램 채널에서 최신 암호화폐 뉴스를 목록 형태로 가져옵니다.
     각 항목은 channel, message_id, timestamp, preview, truncated 정보를 포함합니다.
@@ -363,33 +399,37 @@ async def get_realtime_news(hours: StrictInt = 1) -> str:
         errors = []
         try:
             # Request newest posts first and stop at the first one outside the time window.
-            async for msg in client.iter_messages(ch, limit=10):
-                if _is_before_since(msg, since):
-                    break
-                if msg.text:
-                    message_id = getattr(msg, "id", None)
-                    if (
-                        not isinstance(message_id, int)
-                        or isinstance(message_id, bool)
-                        or message_id < 1
-                    ):
-                        errors.append("메시지 참조를 확인할 수 없습니다.")
-                        continue
-                    message_date = _as_utc(msg.date) if getattr(msg, "date", None) else since
-                    preview = msg.text.replace('\n', ' ').strip()
-                    if len(preview) > 150:
-                        preview = preview[:147] + "..."
-                        truncated = True
-                    else:
-                        truncated = False
-                    messages.append({
-                        "channel": ch,
-                        "message_id": message_id,
-                        "date": message_date,
-                        "timestamp": message_date.strftime('%m-%d %H:%M UTC'),
-                        "preview": preview,
-                        "truncated": truncated,
-                    })
+            async with asyncio.timeout(TELEGRAM_OPERATION_TIMEOUT_SECONDS):
+                async for msg in client.iter_messages(ch, limit=10):
+                    if _is_before_since(msg, since):
+                        break
+                    if msg.text:
+                        message_id = getattr(msg, "id", None)
+                        if (
+                            not isinstance(message_id, int)
+                            or isinstance(message_id, bool)
+                            or message_id < 1
+                        ):
+                            errors.append("메시지 참조를 확인할 수 없습니다.")
+                            continue
+                        message_date = _as_utc(msg.date) if getattr(msg, "date", None) else since
+                        preview = msg.text.replace('\n', ' ').strip()
+                        if len(preview) > 150:
+                            preview = preview[:147] + "..."
+                            truncated = True
+                        else:
+                            truncated = False
+                        messages.append({
+                            "channel": ch,
+                            "message_id": message_id,
+                            "date": message_date,
+                            "timestamp": message_date.strftime('%m-%d %H:%M UTC'),
+                            "preview": preview,
+                            "truncated": truncated,
+                        })
+        except TimeoutError:
+            print(f"Telegram news fetch timed out for {ch}.")
+            errors.append("채널 조회 시간이 초과되었습니다.")
         except Exception as e:
             print(f"Telegram news fetch error for {ch}: {e}")
             errors.append("채널을 조회할 수 없습니다.")
@@ -399,25 +439,22 @@ async def get_realtime_news(hours: StrictInt = 1) -> str:
     results = await asyncio.gather(*tasks, return_exceptions=True)
 
     all_messages = []
-    channel_statuses = {}
+    failed_channels = {}
 
     for i, result in enumerate(results):
         ch = channels[i]
         if isinstance(result, Exception):
             print(f"Telegram news task error for {ch}: {result}")
-            channel_statuses[ch] = "조회 실패: 채널을 조회할 수 없습니다."
+            failed_channels[ch] = "조회 실패: 채널을 조회할 수 없습니다."
         elif isinstance(result, tuple) and len(result) == 2:
             msgs, errors = result
             all_messages.extend(msgs)
             if errors:
-                channel_statuses[ch] = f"조회 실패: {errors[0]}"
-            else:
-                channel_statuses[ch] = f"{len(msgs)}건 조회됨"
+                failed_channels[ch] = f"조회 실패: {errors[0]}"
         else:
-            channel_statuses[ch] = "알 수 없는 오류"
+            failed_channels[ch] = "조회 실패: 알 수 없는 오류"
 
     all_messages.sort(key=lambda m: m["date"], reverse=True)
-    failed_channels = {ch: status for ch, status in channel_statuses.items() if "실패" in status}
 
     if not all_messages and not failed_channels:
         return f"지난 {hours}시간 동안 지정된 채널에서 새로운 뉴스가 없습니다."
@@ -440,7 +477,10 @@ async def get_realtime_news(hours: StrictInt = 1) -> str:
 
 
 @mcp.tool()
-async def get_telegram_message(channel: str, message_id: StrictInt) -> str:
+async def get_telegram_message(
+    channel: TelegramChannel,
+    message_id: TelegramMessageId,
+) -> str:
     """
     텔레그램 채널의 특정 메시지 원문을 조회합니다.
 
@@ -461,12 +501,15 @@ async def get_telegram_message(channel: str, message_id: StrictInt) -> str:
     client = await _get_telegram_client()
 
     try:
-        msg = await client.get_messages(channel, ids=message_id)
+        async with asyncio.timeout(TELEGRAM_OPERATION_TIMEOUT_SECONDS):
+            msg = await client.get_messages(channel, ids=message_id)
         if not msg:
             raise FastMCPError(f"채널 '{channel}'에서 메시지 ID {message_id}를 찾을 수 없습니다.")
         if not msg.text:
             raise FastMCPError(f"메시지 ID {message_id}는 텍스트 콘텐츠를 포함하지 않습니다.")
         return msg.text
+    except TimeoutError:
+        raise FastMCPError("Telegram 메시지 조회 시간이 초과되었습니다.")
     except FastMCPError:
         raise
     except Exception as e:

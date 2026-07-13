@@ -1,3 +1,4 @@
+import asyncio
 import importlib.util
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -345,7 +346,7 @@ async def test_coin_details_rejects_missing_coin_id_without_request(monkeypatch,
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("coin_id", ["x" * 201, "bitcoin/market", "bitcoin?x=1", "-bitcoin", "bitcoin-"])
+@pytest.mark.parametrize("coin_id", ["x" * 201, "bitcoin/market", "bitcoin?x=1", "bitcoin.coin"])
 async def test_coin_details_rejects_unsafe_or_oversized_coin_id_without_request(monkeypatch, coin_id):
     class _FailingAsyncClient:
         def __init__(self):
@@ -360,7 +361,21 @@ async def test_coin_details_rejects_unsafe_or_oversized_coin_id_without_request(
 
 
 @pytest.mark.asyncio
-async def test_coin_details_strips_coin_id_before_request(monkeypatch):
+@pytest.mark.parametrize(
+    ("coin_id", "normalized_id"),
+    [
+        ("  bitcoin  ", "bitcoin"),
+        ("croak_on_linea", "croak_on_linea"),
+        ("aaai_agent-by-virtuals", "aaai_agent-by-virtuals"),
+        ("_", "_"),
+        ("-11", "-11"),
+    ],
+)
+async def test_coin_details_accepts_and_normalizes_safe_coin_ids(
+    monkeypatch,
+    coin_id,
+    normalized_id,
+):
     main_module.COINGECKO_API_KEY = "test-key"
     requested_urls = []
 
@@ -372,10 +387,11 @@ async def test_coin_details_strips_coin_id_before_request(monkeypatch):
     response = FakeResponse({"name": "Bitcoin", "symbol": "btc"})
     monkeypatch.setattr(main_module.httpx, "AsyncClient", lambda: RecordingAsyncClient(response))
 
-    await _tool_callable("get_coin_details")("  bitcoin  ")
+    await _tool_callable("get_coin_details")(coin_id)
 
     assert requested_urls == [
-        "https://api.coingecko.com/api/v3/coins/bitcoin?localization=false&tickers=false&community_data=false&developer_data=false"
+        f"https://api.coingecko.com/api/v3/coins/{normalized_id}"
+        "?localization=false&tickers=false&community_data=false&developer_data=false"
     ]
 
 
@@ -527,6 +543,43 @@ async def test_coin_details_maps_missing_coin_to_clear_error(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_coin_details_maps_non_404_http_error_without_exposing_upstream_details(monkeypatch):
+    main_module.COINGECKO_API_KEY = "test-key"
+    monkeypatch.setattr(
+        main_module.httpx,
+        "AsyncClient",
+        lambda: FakeAsyncClient(FakeResponse({}, status_code=500)),
+    )
+
+    with pytest.raises(main_module.FastMCPError) as error:
+        await _tool_callable("get_coin_details")("bitcoin")
+
+    assert str(error.value) == "'bitcoin' 정보 조회 중 CoinGecko API 오류가 발생했습니다."
+    assert "500" not in str(error.value)
+
+
+@pytest.mark.asyncio
+async def test_coin_details_maps_generic_failure_without_exposing_upstream_details(monkeypatch):
+    main_module.COINGECKO_API_KEY = "test-key"
+
+    class InvalidJsonResponse(FakeResponse):
+        def json(self):
+            raise RuntimeError("private upstream detail")
+
+    monkeypatch.setattr(
+        main_module.httpx,
+        "AsyncClient",
+        lambda: FakeAsyncClient(InvalidJsonResponse({})),
+    )
+
+    with pytest.raises(main_module.FastMCPError) as error:
+        await _tool_callable("get_coin_details")("bitcoin")
+
+    assert str(error.value) == "'bitcoin' 정보를 가져오는 데 실패했습니다."
+    assert "private upstream detail" not in str(error.value)
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("hours", [0, 73, "1", True, 1.0, None])
 async def test_realtime_news_rejects_invalid_hours(hours):
     with pytest.raises(main_module.FastMCPError, match="1과 72 사이"):
@@ -574,6 +627,25 @@ async def test_mcp_integer_parameters_reject_coercible_non_integers(
 
 
 @pytest.mark.asyncio
+async def test_mcp_tool_schemas_publish_runtime_constraints():
+    async with Client(main_module.mcp) as client:
+        tools = {tool.name: tool.inputSchema for tool in await client.list_tools()}
+
+    coin_id = tools["get_coin_details"]["properties"]["coin_id"]
+    assert coin_id["minLength"] == 1
+    assert coin_id["maxLength"] == main_module.COIN_ID_MAX_CHARS
+    assert coin_id["pattern"] == main_module.COIN_ID_PATTERN.pattern
+
+    hours = tools["get_realtime_news"]["properties"]["hours"]
+    assert hours["minimum"] == 1
+    assert hours["maximum"] == 72
+
+    message = tools["get_telegram_message"]["properties"]
+    assert set(message["channel"]["enum"]) == main_module.ALLOWED_TELEGRAM_CHANNELS
+    assert message["message_id"]["minimum"] == 1
+
+
+@pytest.mark.asyncio
 async def test_telegram_client_helper_raises_when_disabled():
     with pytest.raises(main_module.FastMCPError, match="TELEGRAM_API_ID"):
         await main_module._get_telegram_client()
@@ -586,6 +658,29 @@ async def test_lifespan_disables_telegram_when_startup_connection_fails(monkeypa
     main_module.TELEGRAM_SESSION_STRING = "session"
     monkeypatch.setattr(main_module, "StringSession", lambda session: object())
     monkeypatch.setattr(main_module, "TelegramClient", FailingStartupTelegramClient)
+
+    async with main_module.lifespan(None):
+        assert main_module.telegram_client is None
+
+
+@pytest.mark.asyncio
+async def test_lifespan_disables_telegram_when_startup_times_out(monkeypatch):
+    class HangingStartupTelegramClient:
+        async def connect(self):
+            await asyncio.sleep(1)
+
+        async def is_user_authorized(self):
+            return True
+
+        def is_connected(self):
+            return False
+
+    main_module.TELEGRAM_API_ID = "123"
+    main_module.TELEGRAM_API_HASH = "hash"
+    main_module.TELEGRAM_SESSION_STRING = "session"
+    monkeypatch.setattr(main_module, "TELEGRAM_OPERATION_TIMEOUT_SECONDS", 0.01)
+    monkeypatch.setattr(main_module, "StringSession", lambda session: object())
+    monkeypatch.setattr(main_module, "TelegramClient", lambda *args, **kwargs: HangingStartupTelegramClient())
 
     async with main_module.lifespan(None):
         assert main_module.telegram_client is None
@@ -645,6 +740,28 @@ async def test_lifespan_clears_reference_when_authorized_cleanup_fails(monkeypat
     main_module.TELEGRAM_API_HASH = "hash"
     main_module.TELEGRAM_SESSION_STRING = "session"
     fake_client = AuthorizedStartupTelegramClient(disconnect_fails=True)
+    monkeypatch.setattr(main_module, "StringSession", lambda session: object())
+    monkeypatch.setattr(main_module, "TelegramClient", lambda *args, **kwargs: fake_client)
+
+    async with main_module.lifespan(None):
+        assert main_module.telegram_client is fake_client
+
+    assert fake_client.disconnected is True
+    assert main_module.telegram_client is None
+
+
+@pytest.mark.asyncio
+async def test_lifespan_bounds_authorized_cleanup_time(monkeypatch):
+    class HangingDisconnectTelegramClient(AuthorizedStartupTelegramClient):
+        async def disconnect(self):
+            self.disconnected = True
+            await asyncio.sleep(1)
+
+    main_module.TELEGRAM_API_ID = "123"
+    main_module.TELEGRAM_API_HASH = "hash"
+    main_module.TELEGRAM_SESSION_STRING = "session"
+    fake_client = HangingDisconnectTelegramClient()
+    monkeypatch.setattr(main_module, "TELEGRAM_CLEANUP_TIMEOUT_SECONDS", 0.01)
     monkeypatch.setattr(main_module, "StringSession", lambda session: object())
     monkeypatch.setattr(main_module, "TelegramClient", lambda *args, **kwargs: fake_client)
 
@@ -805,6 +922,21 @@ async def test_realtime_news_does_not_expose_unbounded_channel_errors():
 
 
 @pytest.mark.asyncio
+async def test_realtime_news_reports_channel_timeouts(monkeypatch):
+    class HangingTelegramClient:
+        async def iter_messages(self, channel, **kwargs):
+            await asyncio.sleep(1)
+            yield
+
+    monkeypatch.setattr(main_module, "TELEGRAM_OPERATION_TIMEOUT_SECONDS", 0.01)
+    main_module.telegram_client = HangingTelegramClient()
+
+    report = await _tool_callable("get_realtime_news")(1)
+
+    assert report.count("채널 조회 시간이 초과되었습니다.") == 2
+
+
+@pytest.mark.asyncio
 async def test_whale_alerts_return_newest_messages_and_stop_before_since(monkeypatch):
     now = datetime.now(timezone.utc)
     client = RecordingTelegramClient(
@@ -825,6 +957,68 @@ async def test_whale_alerts_return_newest_messages_and_stop_before_since(monkeyp
     assert status == main_module.TelegramStatus.OK
     assert alerts == ["recent whale"]
     assert client.calls == [("whale_alert_io", {"limit": 5})]
+
+
+@pytest.mark.asyncio
+async def test_whale_alerts_reports_auth_failure_when_client_is_unavailable(monkeypatch):
+    monkeypatch.setattr(main_module, "TELEGRAM_API_ID", 1)
+    monkeypatch.setattr(main_module, "TELEGRAM_API_HASH", "hash")
+    monkeypatch.setattr(main_module, "TELEGRAM_SESSION_STRING", "session")
+
+    status, detail = await main_module._fetch_whale_alerts()
+
+    assert status == main_module.TelegramStatus.AUTH_FAILED
+    assert "TELEGRAM_SESSION_STRING" in detail
+
+
+@pytest.mark.asyncio
+async def test_whale_alerts_reports_fetch_failure(monkeypatch):
+    class FailingWhaleClient:
+        async def iter_messages(self, channel, **kwargs):
+            raise RuntimeError("channel unavailable")
+            yield
+
+    monkeypatch.setattr(main_module, "TELEGRAM_API_ID", 1)
+    monkeypatch.setattr(main_module, "TELEGRAM_API_HASH", "hash")
+    monkeypatch.setattr(main_module, "TELEGRAM_SESSION_STRING", "session")
+    main_module.telegram_client = FailingWhaleClient()
+
+    status, detail = await main_module._fetch_whale_alerts()
+
+    assert status == main_module.TelegramStatus.FETCH_FAILED
+    assert detail == "channel unavailable"
+
+
+@pytest.mark.asyncio
+async def test_whale_alerts_reports_no_messages(monkeypatch):
+    monkeypatch.setattr(main_module, "TELEGRAM_API_ID", 1)
+    monkeypatch.setattr(main_module, "TELEGRAM_API_HASH", "hash")
+    monkeypatch.setattr(main_module, "TELEGRAM_SESSION_STRING", "session")
+    main_module.telegram_client = FakeTelegramClient({"whale_alert_io": []})
+
+    assert await main_module._fetch_whale_alerts() == (
+        main_module.TelegramStatus.NO_MESSAGES,
+        "",
+    )
+
+
+@pytest.mark.asyncio
+async def test_whale_alerts_reports_timeout(monkeypatch):
+    class HangingWhaleClient:
+        async def iter_messages(self, channel, **kwargs):
+            await asyncio.sleep(1)
+            yield
+
+    monkeypatch.setattr(main_module, "TELEGRAM_API_ID", 1)
+    monkeypatch.setattr(main_module, "TELEGRAM_API_HASH", "hash")
+    monkeypatch.setattr(main_module, "TELEGRAM_SESSION_STRING", "session")
+    monkeypatch.setattr(main_module, "TELEGRAM_OPERATION_TIMEOUT_SECONDS", 0.01)
+    main_module.telegram_client = HangingWhaleClient()
+
+    assert await main_module._fetch_whale_alerts() == (
+        main_module.TelegramStatus.FETCH_FAILED,
+        "timeout",
+    )
 
 
 @pytest.mark.asyncio
@@ -902,6 +1096,19 @@ async def test_telegram_message_wraps_upstream_failure():
     main_module.telegram_client = FailingMessageClient()
 
     with pytest.raises(main_module.FastMCPError, match="메시지 조회 중 Telegram 오류"):
+        await _tool_callable("get_telegram_message")("watcherguru", 42)
+
+
+@pytest.mark.asyncio
+async def test_telegram_message_reports_timeout(monkeypatch):
+    class HangingMessageClient:
+        async def get_messages(self, channel, ids):
+            await asyncio.sleep(1)
+
+    monkeypatch.setattr(main_module, "TELEGRAM_OPERATION_TIMEOUT_SECONDS", 0.01)
+    main_module.telegram_client = HangingMessageClient()
+
+    with pytest.raises(main_module.FastMCPError, match="조회 시간이 초과"):
         await _tool_callable("get_telegram_message")("watcherguru", 42)
 
 
