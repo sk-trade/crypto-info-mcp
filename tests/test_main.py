@@ -402,6 +402,65 @@ async def test_coin_details_formats_successful_response(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_fastmcp_client_preserves_coin_detail_contract(monkeypatch):
+    main_module.COINGECKO_API_KEY = "test-key"
+    responses = iter(
+        [
+            FakeResponse(
+                {
+                    "name": "Bitcoin",
+                    "symbol": "btc",
+                    "market_cap_rank": 1,
+                    "market_data": {"current_price": {"krw": 123456789}},
+                    "links": {"homepage": ["https://bitcoin.org"]},
+                }
+            ),
+            FakeResponse({}, status_code=404),
+        ]
+    )
+    monkeypatch.setattr(
+        main_module.httpx,
+        "AsyncClient",
+        lambda: FakeAsyncClient(next(responses)),
+    )
+
+    async with Client(main_module.mcp) as client:
+        success = await client.call_tool(
+            "get_coin_details",
+            {"coin_id": "bitcoin"},
+            raise_on_error=False,
+        )
+        blank_id = await client.call_tool(
+            "get_coin_details",
+            {"coin_id": "   "},
+            raise_on_error=False,
+        )
+        missing_coin = await client.call_tool(
+            "get_coin_details",
+            {"coin_id": "missing-coin"},
+            raise_on_error=False,
+        )
+
+    success_text = "\n".join(
+        block.text for block in success.content if getattr(block, "text", None)
+    )
+    blank_id_text = "\n".join(
+        block.text for block in blank_id.content if getattr(block, "text", None)
+    )
+    missing_coin_text = "\n".join(
+        block.text for block in missing_coin.content if getattr(block, "text", None)
+    )
+    assert success.is_error is False
+    assert "Bitcoin" in success_text
+    assert "BTC" in success_text
+    assert "₩123,456,789" in success_text
+    assert blank_id.is_error is True
+    assert "CoinGecko 코인 ID를 입력해주세요." in blank_id_text
+    assert missing_coin.is_error is True
+    assert "'missing-coin' 코인을 찾을 수 없습니다." in missing_coin_text
+
+
+@pytest.mark.asyncio
 async def test_coin_details_formats_null_and_empty_optional_fields(monkeypatch):
     main_module.COINGECKO_API_KEY = "test-key"
     response = FakeResponse(
