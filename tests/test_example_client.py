@@ -78,12 +78,22 @@ def test_process_query_handles_multiple_consecutive_tool_call_turns(monkeypatch)
     class FakeSession:
         def __init__(self):
             self.calls = []
+            self.first_turn_gate = None
 
         async def list_tools(self):
             return SimpleNamespace(tools=[])
 
         async def call_tool(self, name, arguments):
             self.calls.append((name, arguments))
+            if name in {"market", "news"}:
+                if self.first_turn_gate is None:
+                    self.first_turn_gate = asyncio.Event()
+                first_turn_calls = [
+                    call for call in self.calls if call[0] in {"market", "news"}
+                ]
+                if len(first_turn_calls) == 2:
+                    self.first_turn_gate.set()
+                await asyncio.wait_for(self.first_turn_gate.wait(), timeout=1)
             return SimpleNamespace(content=[SimpleNamespace(text=f"{name} result")])
 
     class FakeChat:
@@ -174,6 +184,36 @@ def test_process_query_accepts_final_answer_after_fifth_tool_call_turn():
     assert client.session.call_count == example_client.MAX_TOOL_CALL_TURNS
 
 
+def test_process_query_rejects_tool_call_batch_over_total_budget():
+    class FakeSession:
+        def __init__(self):
+            self.call_count = 0
+
+        async def list_tools(self):
+            return SimpleNamespace(tools=[])
+
+        async def call_tool(self, name, arguments):
+            self.call_count += 1
+            return SimpleNamespace(content=[SimpleNamespace(text="result")])
+
+    class FakeChat:
+        def send_message(self, message, **kwargs):
+            return _response(*[
+                _function_call(f"tool_{index}", {})
+                for index in range(example_client.MAX_TOOL_CALLS + 1)
+            ])
+
+    client = object.__new__(example_client.CryptoAssistantClient)
+    client.session = FakeSession()
+    client.chat = FakeChat()
+    client._mcp_tools_to_gemini_tools = lambda tools: []
+
+    with pytest.raises(RuntimeError, match=f"more than {example_client.MAX_TOOL_CALLS} total"):
+        asyncio.run(client.process_query("bounded batch"))
+
+    assert client.session.call_count == 0
+
+
 def test_process_query_forwards_all_mcp_content_blocks_and_error_state():
     class FakeSession:
         async def list_tools(self):
@@ -211,6 +251,28 @@ def test_process_query_forwards_all_mcp_content_blocks_and_error_state():
         ],
         "isError": True,
     }
+
+
+def test_tool_result_response_uses_json_model_dump_for_mcp_blocks():
+    class ModelBlock:
+        def __init__(self):
+            self.calls = []
+
+        def model_dump(self, **kwargs):
+            self.calls.append(kwargs)
+            return {"type": "text", "text": "serialized"}
+
+    block = ModelBlock()
+
+    response = example_client._tool_result_response(
+        SimpleNamespace(content=[block], isError=True)
+    )
+
+    assert response == {
+        "content": [{"type": "text", "text": "serialized"}],
+        "isError": True,
+    }
+    assert block.calls == [{"mode": "json", "exclude_none": True}]
 
 
 def _function_call(name, arguments):

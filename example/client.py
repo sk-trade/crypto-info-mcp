@@ -14,6 +14,7 @@ from mcp.client.streamable_http import streamablehttp_client
 load_dotenv()
 
 MAX_TOOL_CALL_TURNS = 5
+MAX_TOOL_CALLS = 20
 
 
 def _load_gemini():
@@ -119,7 +120,12 @@ class CryptoAssistantClient:
             self.chat = self.model.start_chat(enable_automatic_function_calling=False)
 
         print("...Gemini에게 질문을 보내는 중...")
-        response = self.chat.send_message(query, tools=available_tools)
+        response = await asyncio.to_thread(
+            self.chat.send_message,
+            query,
+            tools=available_tools,
+        )
+        tool_call_count = 0
 
         for tool_call_turn in range(MAX_TOOL_CALL_TURNS + 1):
             function_calls = [
@@ -131,21 +137,35 @@ class CryptoAssistantClient:
                 return response.text
             if tool_call_turn == MAX_TOOL_CALL_TURNS:
                 break
+            if tool_call_count + len(function_calls) > MAX_TOOL_CALLS:
+                raise RuntimeError(
+                    f"Gemini requested more than {MAX_TOOL_CALLS} total tool calls."
+                )
+            tool_call_count += len(function_calls)
 
-            function_responses = []
+            requested_calls = []
             for function_call in function_calls:
                 tool_name = function_call.name
                 tool_args = dict(function_call.args)
                 print(f"🛠️ Gemini가 도구 호출을 요청합니다: {tool_name}({tool_args})")
-                tool_result_mcp = await self.session.call_tool(tool_name, tool_args)
+                requested_calls.append((tool_name, tool_args))
 
+            tool_results = await asyncio.gather(*(
+                self.session.call_tool(tool_name, tool_args)
+                for tool_name, tool_args in requested_calls
+            ))
+            function_responses = []
+            for (tool_name, _), tool_result_mcp in zip(requested_calls, tool_results):
                 function_responses.append({"function_response": {
                     "name": tool_name,
                     "response": _tool_result_response(tool_result_mcp),
                 }})
 
             print("...도구 실행 결과를 Gemini에게 다시 보내는 중...")
-            response = self.chat.send_message(function_responses)
+            response = await asyncio.to_thread(
+                self.chat.send_message,
+                function_responses,
+            )
 
         raise RuntimeError(
             f"Gemini requested more than {MAX_TOOL_CALL_TURNS} consecutive tool-call turns."
