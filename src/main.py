@@ -40,6 +40,11 @@ ALLOWED_TELEGRAM_CHANNELS = {
     "watcherguru",
     "whale_alert_io",
 }
+TELEGRAM_UNAVAILABLE_MESSAGE = (
+    "텔레그램을 사용할 수 없습니다. 서버 운영자는 TELEGRAM_API_ID, "
+    "TELEGRAM_API_HASH, TELEGRAM_SESSION_STRING 설정과 "
+    "`uv run python scripts/generate_session.py`로 생성한 인증 세션을 확인해주세요."
+)
 
 telegram_client = None
 WHALE_ALERT_MAX_CHARS = 300
@@ -156,7 +161,7 @@ async def _get_telegram_client() -> TelegramClient:
     서버 시작 시 초기화된 전역 텔레그램 클라이언트 인스턴스를 반환합니다.
     """
     if telegram_client is None:
-        raise FastMCPError("텔레그램 클라이언트가 초기화되지 않았거나 인증에 실패했습니다.")
+        raise FastMCPError(TELEGRAM_UNAVAILABLE_MESSAGE)
     return telegram_client
 
 async def _fetch_fear_and_greed_index():
@@ -309,7 +314,9 @@ async def get_coin_details(coin_id: str) -> str:
     if len(coin_id) > COIN_ID_MAX_CHARS or not COIN_ID_PATTERN.fullmatch(coin_id):
         raise FastMCPError("CoinGecko 코인 ID는 영문, 숫자, 하이픈으로 구성된 200자 이하의 값이어야 합니다.")
     if not COINGECKO_API_KEY:
-        raise FastMCPError("서버에 CoinGecko API 키가 설정되지 않았습니다.")
+        raise FastMCPError(
+            "서버에 CoinGecko API 키(COINGECKO_API_KEY)가 설정되지 않았습니다."
+        )
     try:
         url = f"https://api.coingecko.com/api/v3/coins/{coin_id}?localization=false&tickers=false&community_data=false&developer_data=false"
         headers = {'x-cg-demo-api-key': COINGECKO_API_KEY}

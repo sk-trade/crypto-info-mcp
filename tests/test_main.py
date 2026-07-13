@@ -575,7 +575,7 @@ async def test_mcp_integer_parameters_reject_coercible_non_integers(
 
 @pytest.mark.asyncio
 async def test_telegram_client_helper_raises_when_disabled():
-    with pytest.raises(main_module.FastMCPError, match="초기화되지 않았거나 인증에 실패"):
+    with pytest.raises(main_module.FastMCPError, match="TELEGRAM_API_ID"):
         await main_module._get_telegram_client()
 
 
@@ -843,7 +843,7 @@ async def test_realtime_news_reports_clear_no_news_when_channels_are_empty():
 
 @pytest.mark.asyncio
 async def test_realtime_news_errors_when_telegram_disabled():
-    with pytest.raises(main_module.FastMCPError, match="초기화되지 않았거나 인증에 실패"):
+    with pytest.raises(main_module.FastMCPError, match="TELEGRAM_SESSION_STRING"):
         await _tool_callable("get_realtime_news")(1)
 
 
