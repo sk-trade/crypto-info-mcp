@@ -467,9 +467,22 @@ async def get_telegram_message(channel: str, message_id: StrictInt) -> str:
         raise FastMCPError("메시지 조회 중 Telegram 오류가 발생했습니다.")
 
 
-if __name__ == "__main__":
-    print("🚀 Intelligent Crypto Assistant (FastMCP) 서버를 시작합니다.")
-    print("   - 서버 주소: http://0.0.0.0:8123")
-    print("   - 종료하려면 Ctrl+C를 누르세요.")
+def run() -> int:
+    print("🚀 Intelligent Crypto Assistant (FastMCP) 서버를 시작합니다.", flush=True)
+    print("   - 서버 주소: http://0.0.0.0:8123", flush=True)
+    print("   - 종료하려면 Ctrl+C를 누르세요.", flush=True)
 
-    mcp.run(transport="streamable-http", host="0.0.0.0", port=8123)
+    try:
+        mcp.run(
+            transport="streamable-http",
+            host="0.0.0.0",
+            port=8123,
+            uvicorn_config={"timeout_graceful_shutdown": 5},
+        )
+    except KeyboardInterrupt:
+        print("\n서버를 안전하게 종료했습니다.", flush=True)
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(run())

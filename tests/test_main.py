@@ -846,6 +846,25 @@ async def test_telegram_message_wraps_upstream_failure():
         await _tool_callable("get_telegram_message")("watcherguru", 42)
 
 
+def test_run_converts_keyboard_interrupt_to_clean_exit(monkeypatch, capsys):
+    run_arguments = {}
+
+    def interrupted_run(**kwargs):
+        run_arguments.update(kwargs)
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(main_module.mcp, "run", interrupted_run)
+
+    assert main_module.run() == 0
+    assert run_arguments == {
+        "transport": "streamable-http",
+        "host": "0.0.0.0",
+        "port": 8123,
+        "uvicorn_config": {"timeout_graceful_shutdown": 5},
+    }
+    assert "서버를 안전하게 종료했습니다." in capsys.readouterr().out
+
+
 def _resolved(value):
     async def _inner():
         return value
