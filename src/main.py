@@ -355,6 +355,14 @@ async def get_realtime_news(hours: int = 1) -> str:
                 if _is_before_since(msg, since):
                     break
                 if msg.text:
+                    message_id = getattr(msg, "id", None)
+                    if (
+                        not isinstance(message_id, int)
+                        or isinstance(message_id, bool)
+                        or message_id < 1
+                    ):
+                        errors.append("메시지 참조를 확인할 수 없습니다.")
+                        continue
                     message_date = _as_utc(msg.date) if getattr(msg, "date", None) else since
                     preview = msg.text.replace('\n', ' ').strip()
                     if len(preview) > 150:
@@ -364,7 +372,7 @@ async def get_realtime_news(hours: int = 1) -> str:
                         truncated = False
                     messages.append({
                         "channel": ch,
-                        "message_id": getattr(msg, "id", None),
+                        "message_id": message_id,
                         "date": message_date,
                         "timestamp": message_date.strftime('%m-%d %H:%M UTC'),
                         "preview": preview,
@@ -405,9 +413,8 @@ async def get_realtime_news(hours: int = 1) -> str:
     report = [f"지난 {hours}시간 동안의 주요 뉴스:"]
     for msg in all_messages:
         trunc = " (원문 참조 필요)" if msg["truncated"] else ""
-        message_id = f" #{msg['message_id']}" if msg["message_id"] is not None else ""
         report.append(
-            f"- [{msg['timestamp']}] @{msg['channel']}{message_id} / "
+            f"- [{msg['timestamp']}] @{msg['channel']} #{msg['message_id']} / "
             f"{msg['preview']}{trunc}"
         )
 

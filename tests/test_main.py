@@ -147,9 +147,10 @@ class AuthorizedStartupTelegramClient:
 
 
 class FakeMessage:
-    def __init__(self, text, date):
+    def __init__(self, text, date, message_id=1):
         self.text = text
         self.date = date
+        self.id = message_id
 
 
 @pytest.mark.asyncio
@@ -554,7 +555,26 @@ async def test_realtime_news_uses_telegram_client(monkeypatch):
     report = await _tool_callable("get_realtime_news")(1)
 
     assert "지난 1시간 동안의 주요 뉴스" in report
+    assert "@wublockchainenglish #1" in report
     assert "line1 line2" in report
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("message_id", [None, 0, True, "1"])
+async def test_realtime_news_rejects_unusable_message_references(message_id):
+    main_module.telegram_client = FakeTelegramClient(
+        {
+            "wublockchainenglish": [
+                FakeMessage("unusable reference", _dt(), message_id=message_id),
+            ],
+            "watcherguru": [],
+        }
+    )
+
+    report = await _tool_callable("get_realtime_news")(1)
+
+    assert "unusable reference" not in report
+    assert "@wublockchainenglish: 조회 실패: 메시지 참조를 확인할 수 없습니다." in report
 
 
 @pytest.mark.asyncio
