@@ -118,10 +118,14 @@ def test_process_query_handles_multiple_consecutive_tool_call_turns(monkeypatch)
 
 def test_process_query_stops_after_bounded_tool_call_turns():
     class FakeSession:
+        def __init__(self):
+            self.call_count = 0
+
         async def list_tools(self):
             return SimpleNamespace(tools=[])
 
         async def call_tool(self, name, arguments):
+            self.call_count += 1
             return SimpleNamespace(content=[SimpleNamespace(text="result")])
 
     class FakeChat:
@@ -135,6 +139,39 @@ def test_process_query_stops_after_bounded_tool_call_turns():
 
     with pytest.raises(RuntimeError, match="more than 5 consecutive"):
         asyncio.run(client.process_query("계속 호출"))
+
+    assert client.session.call_count == example_client.MAX_TOOL_CALL_TURNS
+
+
+def test_process_query_accepts_final_answer_after_fifth_tool_call_turn():
+    class FakeSession:
+        def __init__(self):
+            self.call_count = 0
+
+        async def list_tools(self):
+            return SimpleNamespace(tools=[])
+
+        async def call_tool(self, name, arguments):
+            self.call_count += 1
+            return SimpleNamespace(content=[SimpleNamespace(text="result")])
+
+    class FakeChat:
+        def __init__(self):
+            self.responses = [
+                _response(_function_call("loop", {}))
+                for _ in range(example_client.MAX_TOOL_CALL_TURNS)
+            ] + [_response(text="final after five")]
+
+        def send_message(self, message, **kwargs):
+            return self.responses.pop(0)
+
+    client = object.__new__(example_client.CryptoAssistantClient)
+    client.session = FakeSession()
+    client.chat = FakeChat()
+    client._mcp_tools_to_gemini_tools = lambda tools: []
+
+    assert asyncio.run(client.process_query("boundary")) == "final after five"
+    assert client.session.call_count == example_client.MAX_TOOL_CALL_TURNS
 
 
 def test_process_query_forwards_all_mcp_content_blocks_and_error_state():

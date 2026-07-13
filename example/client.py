@@ -121,7 +121,7 @@ class CryptoAssistantClient:
         print("...Gemini에게 질문을 보내는 중...")
         response = self.chat.send_message(query, tools=available_tools)
 
-        for _ in range(MAX_TOOL_CALL_TURNS):
+        for tool_call_turn in range(MAX_TOOL_CALL_TURNS + 1):
             function_calls = [
                 part.function_call
                 for part in getattr(response, "parts", [])
@@ -129,6 +129,8 @@ class CryptoAssistantClient:
             ]
             if not function_calls:
                 return response.text
+            if tool_call_turn == MAX_TOOL_CALL_TURNS:
+                break
 
             function_responses = []
             for function_call in function_calls:
