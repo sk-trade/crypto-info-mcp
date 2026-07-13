@@ -11,6 +11,28 @@ A FastMCP service for crypto market summaries, CoinGecko coin details, and recen
 
 Use the `channel` and `message_id` shown by `get_realtime_news` when calling `get_telegram_message`. Supported channels are `watcherguru`, `wublockchainenglish`, and `whale_alert_io`; message IDs must be positive integers.
 
+## Prerequisites
+
+- Python 3.11 or newer.
+- [`uv`](https://docs.astral.sh/uv/getting-started/installation/).
+
+## Quick start
+
+Install the locked dependencies and start the server. Credentials are optional for this first smoke check.
+
+```bash
+uv sync --frozen
+uv run python -m src.main
+```
+
+In a second terminal, connect through the real MCP HTTP endpoint and call `get_market_overview`:
+
+```bash
+uv run python example/smoke_client.py
+```
+
+The command lists the four expected tools and prints a Korean market overview. Without Telegram credentials, the overview explicitly reports that whale-alert data is unavailable.
+
 ## Environment variables
 
 Set these in `.env` before starting the service:
@@ -22,13 +44,6 @@ Set these in `.env` before starting the service:
 - `VERSION` - optional Docker image tag; defaults to `local` in Docker Compose.
 
 If Telegram variables are missing, market overview still works and clearly reports that whale-alert data is unavailable because Telegram is not configured.
-
-## Local run
-
-```bash
-uv sync
-uv run python -m src.main
-```
 
 The server listens on `0.0.0.0:8123` with the streamable HTTP transport.
 
