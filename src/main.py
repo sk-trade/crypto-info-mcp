@@ -11,6 +11,7 @@ from telethon.sessions import StringSession
 
 from fastmcp import FastMCP
 from fastmcp.exceptions import FastMCPError
+from pydantic import StrictInt
 
 # --- 설정 및 전역 변수 초기화 ---
 load_dotenv()
@@ -328,7 +329,7 @@ async def get_coin_details(coin_id: str) -> str:
         raise FastMCPError(f"'{coin_id}' 정보를 가져오는 데 실패했습니다.")
 
 @mcp.tool()
-async def get_realtime_news(hours: int = 1) -> str:
+async def get_realtime_news(hours: StrictInt = 1) -> str:
     """
     주요 텔레그램 채널에서 최신 암호화폐 뉴스를 목록 형태로 가져옵니다.
     각 항목은 channel, message_id, timestamp, preview, truncated 정보를 포함합니다.
@@ -338,7 +339,11 @@ async def get_realtime_news(hours: int = 1) -> str:
     Args:
         hours (int, optional): 현재로부터 몇 시간 전까지의 뉴스를 가져올지 지정합니다. 기본값은 1, 최대값은 72입니다.
     """
-    if not (1 <= hours <= 72):
+    if (
+        not isinstance(hours, int)
+        or isinstance(hours, bool)
+        or not (1 <= hours <= 72)
+    ):
         raise FastMCPError("'hours' 파라미터는 1과 72 사이의 값이어야 합니다.")
 
     channels = ['wublockchainenglish', 'watcherguru']
@@ -428,7 +433,7 @@ async def get_realtime_news(hours: int = 1) -> str:
 
 
 @mcp.tool()
-async def get_telegram_message(channel: str, message_id: int) -> str:
+async def get_telegram_message(channel: str, message_id: StrictInt) -> str:
     """
     텔레그램 채널의 특정 메시지 원문을 조회합니다.
 
@@ -439,7 +444,11 @@ async def get_telegram_message(channel: str, message_id: int) -> str:
     if channel not in ALLOWED_TELEGRAM_CHANNELS:
         allowed = ", ".join(sorted(ALLOWED_TELEGRAM_CHANNELS))
         raise FastMCPError(f"허용되지 않은 채널입니다. 허용 채널: {allowed}")
-    if message_id < 1:
+    if (
+        not isinstance(message_id, int)
+        or isinstance(message_id, bool)
+        or message_id < 1
+    ):
         raise FastMCPError("'message_id' 파라미터는 1 이상의 정수여야 합니다.")
 
     client = await _get_telegram_client()

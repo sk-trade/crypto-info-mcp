@@ -4,6 +4,7 @@ from pathlib import Path
 
 import httpx
 import pytest
+from fastmcp import Client
 
 spec = importlib.util.spec_from_file_location("main_module", Path(__file__).resolve().parents[1] / "src" / "main.py")
 main_module = importlib.util.module_from_spec(spec)
@@ -456,9 +457,50 @@ async def test_coin_details_maps_missing_coin_to_clear_error(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_realtime_news_rejects_invalid_hours():
+@pytest.mark.parametrize("hours", [0, 73, "1", True, 1.0, None])
+async def test_realtime_news_rejects_invalid_hours(hours):
     with pytest.raises(main_module.FastMCPError, match="1과 72 사이"):
-        await _tool_callable("get_realtime_news")(0)
+        await _tool_callable("get_realtime_news")(hours)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("tool_name", "arguments", "field"),
+    [
+        ("get_realtime_news", {"hours": "1"}, "hours"),
+        ("get_realtime_news", {"hours": True}, "hours"),
+        ("get_realtime_news", {"hours": 1.0}, "hours"),
+        (
+            "get_telegram_message",
+            {"channel": "watcherguru", "message_id": "1"},
+            "message_id",
+        ),
+        (
+            "get_telegram_message",
+            {"channel": "watcherguru", "message_id": True},
+            "message_id",
+        ),
+        (
+            "get_telegram_message",
+            {"channel": "watcherguru", "message_id": 1.0},
+            "message_id",
+        ),
+    ],
+)
+async def test_mcp_integer_parameters_reject_coercible_non_integers(
+    tool_name,
+    arguments,
+    field,
+):
+    async with Client(main_module.mcp) as client:
+        result = await client.call_tool(tool_name, arguments, raise_on_error=False)
+
+    error_text = "\n".join(
+        block.text for block in result.content if getattr(block, "text", None)
+    )
+    assert result.is_error is True
+    assert field in error_text
+    assert "valid integer" in error_text
 
 
 @pytest.mark.asyncio
@@ -707,9 +749,10 @@ async def test_telegram_message_rejects_disallowed_channel_before_client_lookup(
 
 
 @pytest.mark.asyncio
-async def test_telegram_message_rejects_non_positive_message_id_before_client_lookup():
+@pytest.mark.parametrize("message_id", [0, -1, "1", True, 1.0, None])
+async def test_telegram_message_rejects_invalid_message_id_before_client_lookup(message_id):
     with pytest.raises(main_module.FastMCPError, match="1 이상의 정수"):
-        await _tool_callable("get_telegram_message")("watcherguru", 0)
+        await _tool_callable("get_telegram_message")("watcherguru", message_id)
 
 
 @pytest.mark.asyncio
