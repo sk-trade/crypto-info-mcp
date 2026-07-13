@@ -154,6 +154,17 @@ class FakeMessage:
         self.id = message_id
 
 
+class AuthorizedMCPTestTelegramClient(AuthorizedStartupTelegramClient):
+    async def iter_messages(self, channel, **kwargs):
+        if channel == "wublockchainenglish":
+            yield FakeMessage("protocol news preview", _dt(), message_id=42)
+
+    async def get_messages(self, channel, ids):
+        if channel == "wublockchainenglish" and ids == 42:
+            return FakeMessage("protocol full message", _dt(), message_id=42)
+        return None
+
+
 @pytest.mark.asyncio
 async def test_market_overview_combines_available_sources(monkeypatch):
     monkeypatch.setattr(main_module, "_fetch_fear_and_greed_index", lambda: _resolved({"value": "70", "value_classification": "Greed"}))
@@ -581,6 +592,41 @@ async def test_lifespan_clears_reference_when_authorized_cleanup_fails(monkeypat
     async with main_module.lifespan(None):
         assert main_module.telegram_client is fake_client
 
+    assert fake_client.disconnected is True
+    assert main_module.telegram_client is None
+
+
+@pytest.mark.asyncio
+async def test_fastmcp_client_follows_news_reference_to_full_message(monkeypatch):
+    main_module.TELEGRAM_API_ID = 123
+    main_module.TELEGRAM_API_HASH = "hash"
+    main_module.TELEGRAM_SESSION_STRING = "session"
+    fake_client = AuthorizedMCPTestTelegramClient()
+    monkeypatch.setattr(main_module, "StringSession", lambda session: object())
+    monkeypatch.setattr(main_module, "TelegramClient", lambda *args, **kwargs: fake_client)
+
+    async with Client(main_module.mcp) as client:
+        news_result = await client.call_tool(
+            "get_realtime_news",
+            {"hours": 1},
+            raise_on_error=False,
+        )
+        message_result = await client.call_tool(
+            "get_telegram_message",
+            {"channel": "wublockchainenglish", "message_id": 42},
+            raise_on_error=False,
+        )
+
+    news_text = "\n".join(
+        block.text for block in news_result.content if getattr(block, "text", None)
+    )
+    message_text = "\n".join(
+        block.text for block in message_result.content if getattr(block, "text", None)
+    )
+    assert news_result.is_error is False
+    assert "@wublockchainenglish #42 / protocol news preview" in news_text
+    assert message_result.is_error is False
+    assert message_text == "protocol full message"
     assert fake_client.disconnected is True
     assert main_module.telegram_client is None
 
