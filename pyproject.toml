@@ -1,6 +1,6 @@
 [project]
 name = "crypto-info-mcp"
-version = "0.1.4"
+version = "0.2.0"
 description = "FastMCP service for crypto market summaries, CoinGecko coin details, and recent Telegram news."
 readme = "README.md"
 requires-python = ">=3.11"
