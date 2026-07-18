@@ -3,6 +3,8 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from fastmcp.client.client import CallToolResult
+from mcp.types import TextContent
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -36,8 +38,10 @@ class FakeClient:
 
 
 def _result(text, is_error=False):
-    return SimpleNamespace(
-        content=[SimpleNamespace(text=text)],
+    return CallToolResult(
+        content=[TextContent(type="text", text=text)],
+        structured_content=None,
+        meta=None,
         is_error=is_error,
     )
 
@@ -77,3 +81,15 @@ async def test_smoke_client_preserves_tool_error(monkeypatch, capsys):
 
     assert await smoke_client.run_smoke("http://example.test/mcp") == 1
     assert "upstream unavailable" in capsys.readouterr().err
+
+
+@pytest.mark.asyncio
+async def test_smoke_client_rejects_empty_success(monkeypatch, capsys):
+    fake_client = FakeClient(
+        smoke_client.REQUIRED_TOOLS,
+        _result("   "),
+    )
+    monkeypatch.setattr(smoke_client, "Client", lambda url: fake_client)
+
+    assert await smoke_client.run_smoke("http://example.test/mcp") == 1
+    assert "the tool returned no text" in capsys.readouterr().err

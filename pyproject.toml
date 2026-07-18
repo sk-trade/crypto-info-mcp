@@ -27,4 +27,3 @@ default-groups = ["dev"]
 pythonpath = ["."]
 asyncio_mode = "auto"
 testpaths = ["tests"]
-addopts = "--ignore=example/all_test.py"

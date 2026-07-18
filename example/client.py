@@ -9,6 +9,7 @@ from dotenv import load_dotenv
 
 from mcp import ClientSession
 from mcp.client.streamable_http import streamablehttp_client
+from mcp.types import CallToolResult
 
 # .env 파일에서 환경 변수 로드
 load_dotenv()
@@ -22,7 +23,12 @@ def _load_gemini():
         import google.generativeai as genai
         from google.generativeai.types import FunctionDeclaration, Tool
     except ModuleNotFoundError as exc:
-        if exc.name and exc.name.split(".")[0] == "google":
+        missing_module = exc.name or ""
+        if (
+            missing_module == "google"
+            or missing_module == "google.generativeai"
+            or missing_module.startswith("google.generativeai.")
+        ):
             raise RuntimeError(
                 "Gemini client dependency is missing. Install it with "
                 "`uv run --with google-generativeai python example/client.py --host localhost --port 8123` "
@@ -34,18 +40,18 @@ def _load_gemini():
     return genai, FunctionDeclaration, Tool
 
 
-def _tool_result_response(tool_result: Any) -> dict[str, Any]:
+def _tool_result_response(tool_result: CallToolResult) -> dict[str, Any]:
     """Convert every MCP content block into Gemini-safe structured response data."""
-    content = []
-    for block in getattr(tool_result, "content", []) or []:
-        if hasattr(block, "model_dump"):
-            content.append(block.model_dump(mode="json", exclude_none=True))
-        else:
-            content.append({
-                "type": getattr(block, "type", "text"),
-                "text": getattr(block, "text", str(block)),
-            })
-    return {"content": content, "isError": bool(getattr(tool_result, "isError", False))}
+    response = {
+        "content": [
+            block.model_dump(mode="json", exclude_none=True)
+            for block in tool_result.content
+        ],
+        "isError": tool_result.isError,
+    }
+    if tool_result.structuredContent is not None:
+        response["structuredContent"] = tool_result.structuredContent
+    return response
 
 
 class CryptoAssistantClient:
@@ -165,6 +171,7 @@ class CryptoAssistantClient:
             response = await asyncio.to_thread(
                 self.chat.send_message,
                 function_responses,
+                tools=available_tools,
             )
 
         raise RuntimeError(

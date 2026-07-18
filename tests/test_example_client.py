@@ -7,12 +7,20 @@ import sys
 from types import SimpleNamespace
 
 import pytest
+from mcp.types import CallToolResult, TextContent
 
 
 ROOT = Path(__file__).resolve().parents[1]
 SPEC = importlib.util.spec_from_file_location("example_client_module", ROOT / "example" / "client.py")
 example_client = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(example_client)
+
+
+def _tool_result(text="result", is_error=False):
+    return CallToolResult(
+        content=[TextContent(type="text", text=text)],
+        isError=is_error,
+    )
 
 
 def test_example_client_help_does_not_require_gemini_dependency():
@@ -33,7 +41,7 @@ def test_load_gemini_reports_install_command_when_dependency_missing(monkeypatch
     real_import = builtins.__import__
 
     def fake_import(name, *args, **kwargs):
-        if name.startswith("google.generativeai"):
+        if name in {"google.generativeai", "google.generativeai.types"}:
             raise ModuleNotFoundError("No module named 'google'", name="google")
         return real_import(name, *args, **kwargs)
 
@@ -41,6 +49,29 @@ def test_load_gemini_reports_install_command_when_dependency_missing(monkeypatch
 
     with pytest.raises(RuntimeError, match="google-generativeai"):
         example_client._load_gemini()
+
+
+@pytest.mark.parametrize(
+    "missing_module",
+    ["grpc_status", "google.ai.generativelanguage"],
+)
+def test_load_gemini_preserves_unrelated_import_failures(monkeypatch, missing_module):
+    real_import = builtins.__import__
+
+    def fake_import(name, *args, **kwargs):
+        if name == "google.generativeai":
+            raise ModuleNotFoundError(
+                f"No module named '{missing_module}'",
+                name=missing_module,
+            )
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", fake_import)
+
+    with pytest.raises(ModuleNotFoundError) as captured:
+        example_client._load_gemini()
+
+    assert captured.value.name == missing_module
 
 
 def test_main_returns_1_when_cleanup_raises_after_connect_failure(monkeypatch, capsys):
@@ -94,7 +125,7 @@ def test_process_query_handles_multiple_consecutive_tool_call_turns(monkeypatch)
                 if len(first_turn_calls) == 2:
                     self.first_turn_gate.set()
                 await asyncio.wait_for(self.first_turn_gate.wait(), timeout=1)
-            return SimpleNamespace(content=[SimpleNamespace(text=f"{name} result")])
+            return _tool_result(f"{name} result")
 
     class FakeChat:
         def __init__(self):
@@ -112,7 +143,8 @@ def test_process_query_handles_multiple_consecutive_tool_call_turns(monkeypatch)
     client = object.__new__(example_client.CryptoAssistantClient)
     client.session = FakeSession()
     client.chat = FakeChat()
-    client._mcp_tools_to_gemini_tools = lambda tools: []
+    available_tools = [object()]
+    client._mcp_tools_to_gemini_tools = lambda tools: available_tools
 
     answer = asyncio.run(client.process_query("시장 분석"))
 
@@ -124,6 +156,10 @@ def test_process_query_handles_multiple_consecutive_tool_call_turns(monkeypatch)
     ]
     assert len(client.chat.messages) == 3
     assert len(client.chat.messages[1][0]) == 2
+    assert all(
+        kwargs["tools"] is available_tools
+        for _, kwargs in client.chat.messages
+    )
 
 
 def test_process_query_stops_after_bounded_tool_call_turns():
@@ -136,7 +172,7 @@ def test_process_query_stops_after_bounded_tool_call_turns():
 
         async def call_tool(self, name, arguments):
             self.call_count += 1
-            return SimpleNamespace(content=[SimpleNamespace(text="result")])
+            return _tool_result()
 
     class FakeChat:
         def send_message(self, message, **kwargs):
@@ -163,7 +199,7 @@ def test_process_query_accepts_final_answer_after_fifth_tool_call_turn():
 
         async def call_tool(self, name, arguments):
             self.call_count += 1
-            return SimpleNamespace(content=[SimpleNamespace(text="result")])
+            return _tool_result()
 
     class FakeChat:
         def __init__(self):
@@ -194,7 +230,7 @@ def test_process_query_rejects_tool_call_batch_over_total_budget():
 
         async def call_tool(self, name, arguments):
             self.call_count += 1
-            return SimpleNamespace(content=[SimpleNamespace(text="result")])
+            return _tool_result()
 
     class FakeChat:
         def send_message(self, message, **kwargs):
@@ -220,11 +256,16 @@ def test_process_query_forwards_all_mcp_content_blocks_and_error_state():
             return SimpleNamespace(tools=[])
 
         async def call_tool(self, name, arguments):
-            return SimpleNamespace(
+            return CallToolResult(
                 content=[
-                    SimpleNamespace(type="text", text="first"),
-                    SimpleNamespace(type="text", text="second"),
+                    TextContent(type="text", text="first"),
+                    TextContent(type="text", text="second"),
                 ],
+                structuredContent={
+                    "messages": [
+                        {"channel": "wublockchainenglish", "message_id": 42}
+                    ]
+                },
                 isError=True,
             )
 
@@ -249,30 +290,24 @@ def test_process_query_forwards_all_mcp_content_blocks_and_error_state():
             {"type": "text", "text": "first"},
             {"type": "text", "text": "second"},
         ],
+        "structuredContent": {
+            "messages": [
+                {"channel": "wublockchainenglish", "message_id": 42}
+            ]
+        },
         "isError": True,
     }
 
 
 def test_tool_result_response_uses_json_model_dump_for_mcp_blocks():
-    class ModelBlock:
-        def __init__(self):
-            self.calls = []
-
-        def model_dump(self, **kwargs):
-            self.calls.append(kwargs)
-            return {"type": "text", "text": "serialized"}
-
-    block = ModelBlock()
-
     response = example_client._tool_result_response(
-        SimpleNamespace(content=[block], isError=True)
+        _tool_result("serialized", is_error=True)
     )
 
     assert response == {
         "content": [{"type": "text", "text": "serialized"}],
         "isError": True,
     }
-    assert block.calls == [{"mode": "json", "exclude_none": True}]
 
 
 def _function_call(name, arguments):

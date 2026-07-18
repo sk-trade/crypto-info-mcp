@@ -3,6 +3,8 @@ import asyncio
 import sys
 
 from fastmcp import Client
+from fastmcp.client.client import CallToolResult
+from mcp.types import TextContent
 
 
 REQUIRED_TOOLS = {
@@ -13,9 +15,9 @@ REQUIRED_TOOLS = {
 }
 
 
-def _text_content(result) -> str:
+def _text_content(result: CallToolResult) -> str:
     return "\n".join(
-        block.text for block in result.content if getattr(block, "text", None)
+        block.text for block in result.content if isinstance(block, TextContent)
     ).strip()
 
 
