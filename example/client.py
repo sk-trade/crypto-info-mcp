@@ -9,9 +9,13 @@ from dotenv import load_dotenv
 
 from mcp import ClientSession
 from mcp.client.streamable_http import streamablehttp_client
+from mcp.types import CallToolResult
 
 # .env 파일에서 환경 변수 로드
 load_dotenv()
+
+MAX_TOOL_CALL_TURNS = 5
+MAX_TOOL_CALLS = 20
 
 
 def _load_gemini():
@@ -19,7 +23,12 @@ def _load_gemini():
         import google.generativeai as genai
         from google.generativeai.types import FunctionDeclaration, Tool
     except ModuleNotFoundError as exc:
-        if exc.name and exc.name.split(".")[0] == "google":
+        missing_module = exc.name or ""
+        if (
+            missing_module == "google"
+            or missing_module == "google.generativeai"
+            or missing_module.startswith("google.generativeai.")
+        ):
             raise RuntimeError(
                 "Gemini client dependency is missing. Install it with "
                 "`uv run --with google-generativeai python example/client.py --host localhost --port 8123` "
@@ -29,6 +38,21 @@ def _load_gemini():
 
     genai.configure(api_key=os.getenv("GOOGLE_API_KEY", ""))
     return genai, FunctionDeclaration, Tool
+
+
+def _tool_result_response(tool_result: CallToolResult) -> dict[str, Any]:
+    """Convert every MCP content block into Gemini-safe structured response data."""
+    response = {
+        "content": [
+            block.model_dump(mode="json", exclude_none=True)
+            for block in tool_result.content
+        ],
+        "isError": tool_result.isError,
+    }
+    if tool_result.structuredContent is not None:
+        response["structuredContent"] = tool_result.structuredContent
+    return response
+
 
 class CryptoAssistantClient:
     """
@@ -102,32 +126,57 @@ class CryptoAssistantClient:
             self.chat = self.model.start_chat(enable_automatic_function_calling=False)
 
         print("...Gemini에게 질문을 보내는 중...")
-        response = self.chat.send_message(query, tools=available_tools)
+        response = await asyncio.to_thread(
+            self.chat.send_message,
+            query,
+            tools=available_tools,
+        )
+        tool_call_count = 0
 
-        response_part = response.parts[0]
-        if response_part.function_call:
-            fc = response_part.function_call
-            tool_name = fc.name
-            tool_args = dict(fc.args)
+        for tool_call_turn in range(MAX_TOOL_CALL_TURNS + 1):
+            function_calls = [
+                part.function_call
+                for part in getattr(response, "parts", [])
+                if getattr(part, "function_call", None)
+            ]
+            if not function_calls:
+                return response.text
+            if tool_call_turn == MAX_TOOL_CALL_TURNS:
+                break
+            if tool_call_count + len(function_calls) > MAX_TOOL_CALLS:
+                raise RuntimeError(
+                    f"Gemini requested more than {MAX_TOOL_CALLS} total tool calls."
+                )
+            tool_call_count += len(function_calls)
 
-            print(f"🛠️ Gemini가 도구 호출을 요청합니다: {tool_name}({tool_args})")
-            tool_result_mcp = await self.session.call_tool(tool_name, tool_args)
-            print("...도구 실행 결과를 Gemini에게 다시 보내는 중...")
+            requested_calls = []
+            for function_call in function_calls:
+                tool_name = function_call.name
+                tool_args = dict(function_call.args)
+                print(f"🛠️ Gemini가 도구 호출을 요청합니다: {tool_name}({tool_args})")
+                requested_calls.append((tool_name, tool_args))
 
-            # MCP 서버의 응답(Streamable)에서 실제 텍스트 내용을 추출
-            tool_response_content = ""
-            if isinstance(tool_result_mcp.content, list) and tool_result_mcp.content:
-                tool_response_content = tool_result_mcp.content[0].text
-
-            # 추출한 결과를 Gemini에 전달하여 최종 답변 생성
-            response = self.chat.send_message(
-                [{"function_response": {
+            tool_results = await asyncio.gather(*(
+                self.session.call_tool(tool_name, tool_args)
+                for tool_name, tool_args in requested_calls
+            ))
+            function_responses = []
+            for (tool_name, _), tool_result_mcp in zip(requested_calls, tool_results):
+                function_responses.append({"function_response": {
                     "name": tool_name,
-                    "response": {"content": tool_response_content},
-                }}]
+                    "response": _tool_result_response(tool_result_mcp),
+                }})
+
+            print("...도구 실행 결과를 Gemini에게 다시 보내는 중...")
+            response = await asyncio.to_thread(
+                self.chat.send_message,
+                function_responses,
+                tools=available_tools,
             )
 
-        return response.text
+        raise RuntimeError(
+            f"Gemini requested more than {MAX_TOOL_CALL_TURNS} consecutive tool-call turns."
+        )
 
     async def chat_loop(self):
         """사용자와 상호작용하는 메인 채팅 루프입니다."""

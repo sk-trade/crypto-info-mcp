@@ -13,8 +13,11 @@ services:
         - "18123:8123"
       networks:
         - bridge_server
-      env_file:
-        - .env
+      environment:
+        COINGECKO_API_KEY: ${COINGECKO_API_KEY:-}
+        TELEGRAM_API_ID: ${TELEGRAM_API_ID:-}
+        TELEGRAM_API_HASH: ${TELEGRAM_API_HASH:-}
+        TELEGRAM_SESSION_STRING: ${TELEGRAM_SESSION_STRING:-}
 
 networks:
   bridge_server:
