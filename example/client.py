@@ -3,7 +3,7 @@
 import os
 import argparse
 import asyncio
-from typing import Optional, Dict, Any, List
+from typing import Optional, Any
 
 from dotenv import load_dotenv
 
@@ -20,24 +20,23 @@ MAX_TOOL_CALLS = 20
 
 def _load_gemini():
     try:
-        import google.generativeai as genai
-        from google.generativeai.types import FunctionDeclaration, Tool
+        import google.genai as genai
+        from google.genai import types
     except ModuleNotFoundError as exc:
         missing_module = exc.name or ""
         if (
             missing_module == "google"
-            or missing_module == "google.generativeai"
-            or missing_module.startswith("google.generativeai.")
+            or missing_module == "google.genai"
+            or missing_module.startswith("google.genai.")
         ):
             raise RuntimeError(
                 "Gemini client dependency is missing. Install it with "
-                "`uv run --with google-generativeai python example/client.py --host localhost --port 8123` "
-                "or add `google-generativeai` to your development dependencies."
+                "`uv run --with google-genai python example/client.py --host localhost --port 8123` "
+                "or add `google-genai` to your development dependencies."
             ) from exc
         raise
 
-    genai.configure(api_key=os.getenv("GOOGLE_API_KEY", ""))
-    return genai, FunctionDeclaration, Tool
+    return genai, types
 
 
 def _tool_result_response(tool_result: CallToolResult) -> dict[str, Any]:
@@ -60,12 +59,14 @@ class CryptoAssistantClient:
     Gemini를 사용하여 사용자의 질문을 이해하고 서버의 도구를 호출합니다.
     """
     def __init__(self):
-        self._genai, self._FunctionDeclaration, self._Tool = _load_gemini()
+        self._genai, self._types = _load_gemini()
+        api_key = os.getenv("GOOGLE_API_KEY")
+        if not api_key:
+            raise RuntimeError(
+                "GOOGLE_API_KEY is required for the conversational example client."
+            )
+        self._gemini_client = self._genai.Client(api_key=api_key)
         self.session: Optional[ClientSession] = None
-        self.model = self._genai.GenerativeModel(
-            'gemini-2.5-flash', 
-            system_instruction="당신은 친절하고 전문적인 암호화폐 시장 분석가입니다. 사용자의 질문에 답하기 위해 사용 가능한 도구를 활용하세요."
-        )
         self.chat = None
         self._streams_context = None
         self._session_context = None
@@ -84,34 +85,19 @@ class CryptoAssistantClient:
             print(f"❌ 서버 연결 실패: {e}")
             raise
 
-    def _remove_keys_recursively(self, obj: Any, keys_to_remove: List[str]) -> Any:
-        """딕셔너리/리스트에서 특정 키들을 재귀적으로 제거합니다."""
-        if isinstance(obj, dict):
-            return {
-                key: self._remove_keys_recursively(value, keys_to_remove)
-                for key, value in obj.items() if key not in keys_to_remove
-            }
-        elif isinstance(obj, list):
-            return [self._remove_keys_recursively(item, keys_to_remove) for item in obj]
-        return obj
-
     def _mcp_tools_to_gemini_tools(self, mcp_tools: list) -> list[Any]:
         """MCP 도구 스키마를 Gemini가 이해할 수 있는 형식으로 변환합니다."""
-        gemini_tools = []
-        # Gemini API와 호환되지 않아 제거해야 할 스키마 필드 목록
-        keys_to_remove = ['title', 'default']
-
-        for tool in mcp_tools:
-            # 재귀 함수를 사용해 불필요한 키들을 제거
-            gemini_compatible_schema = self._remove_keys_recursively(tool.inputSchema, keys_to_remove)
-
-            function_declaration = self._FunctionDeclaration(
+        function_declarations = [
+            self._types.FunctionDeclaration(
                 name=tool.name,
                 description=tool.description,
-                parameters=gemini_compatible_schema,
+                parameters_json_schema=tool.inputSchema,
             )
-            gemini_tools.append(self._Tool(function_declarations=[function_declaration]))
-        return gemini_tools
+            for tool in mcp_tools
+        ]
+        if not function_declarations:
+            return []
+        return [self._types.Tool(function_declarations=function_declarations)]
 
     async def process_query(self, query: str) -> str:
         """사용자 쿼리를 처리하고, 필요 시 도구를 호출한 뒤 최종 답변을 반환합니다."""
@@ -123,13 +109,24 @@ class CryptoAssistantClient:
         available_tools = self._mcp_tools_to_gemini_tools(response.tools)
 
         if self.chat is None:
-            self.chat = self.model.start_chat(enable_automatic_function_calling=False)
+            self.chat = self._gemini_client.chats.create(
+                model="gemini-2.5-flash",
+                config=self._types.GenerateContentConfig(
+                    system_instruction=(
+                        "당신은 친절하고 전문적인 암호화폐 시장 분석가입니다. "
+                        "사용자의 질문에 답하기 위해 사용 가능한 도구를 활용하세요."
+                    ),
+                    tools=available_tools,
+                    automatic_function_calling=self._types.AutomaticFunctionCallingConfig(
+                        disable=True
+                    ),
+                ),
+            )
 
         print("...Gemini에게 질문을 보내는 중...")
         response = await asyncio.to_thread(
             self.chat.send_message,
             query,
-            tools=available_tools,
         )
         tool_call_count = 0
 
@@ -162,16 +159,17 @@ class CryptoAssistantClient:
             ))
             function_responses = []
             for (tool_name, _), tool_result_mcp in zip(requested_calls, tool_results):
-                function_responses.append({"function_response": {
-                    "name": tool_name,
-                    "response": _tool_result_response(tool_result_mcp),
-                }})
+                function_responses.append(
+                    self._types.Part.from_function_response(
+                        name=tool_name,
+                        response=_tool_result_response(tool_result_mcp),
+                    )
+                )
 
             print("...도구 실행 결과를 Gemini에게 다시 보내는 중...")
             response = await asyncio.to_thread(
                 self.chat.send_message,
                 function_responses,
-                tools=available_tools,
             )
 
         raise RuntimeError(
@@ -193,6 +191,9 @@ class CryptoAssistantClient:
                 response_text = await self.process_query(query)
                 print(f"\n🤖 Assistant:\n{response_text}")
 
+            except EOFError:
+                print("\n👋 입력이 종료되어 클라이언트를 종료합니다.")
+                break
             except Exception as e:
                 print(f"\n💥 예기치 않은 오류 발생: {e}")
                 print("   대화를 다시 시작합니다.")

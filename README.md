@@ -33,6 +33,21 @@ uv run python example/smoke_client.py
 
 The command lists the four expected tools and prints a Korean market overview. Without Telegram credentials, the overview explicitly reports that whale-alert data is unavailable.
 
+### Optional conversational client
+
+After the smoke check succeeds, you can exercise the same MCP server through the
+included Gemini conversational client. This client uses `GOOGLE_API_KEY` only for
+Gemini; the key is not a server credential and is not forwarded to the MCP server.
+
+```bash
+GOOGLE_API_KEY=your-key \
+  uv run --with google-genai python example/client.py --host localhost --port 8123
+```
+
+Ask a market or coin question, then enter `quit` or `exit` to close the client.
+The optional `google-genai` dependency is loaded only for this example and is not
+part of the server runtime dependency set.
+
 ## Environment variables
 
 Create `.env` from the checked-in template, then fill only the integrations you

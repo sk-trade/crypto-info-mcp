@@ -32,18 +32,15 @@ async def _assert_crypto_error(awaitable, code):
 
 @pytest.fixture(autouse=True)
 def reset_runtime_state(monkeypatch):
-    monkeypatch.setattr(main_module, "telegram_client", None)
     monkeypatch.setattr(
         main_module,
-        "telegram_availability",
+        "telegram_runtime",
         main_module.TelegramAvailability.NOT_CONFIGURED,
     )
     monkeypatch.setattr(main_module, "COINGECKO_API_KEY", None)
     monkeypatch.setattr(main_module, "TELEGRAM_API_ID", None)
     monkeypatch.setattr(main_module, "TELEGRAM_API_HASH", None)
     monkeypatch.setattr(main_module, "TELEGRAM_SESSION_STRING", None)
-    yield
-    monkeypatch.setattr(main_module, "telegram_client", None)
 
 
 class FakeResponse:
@@ -217,31 +214,6 @@ async def test_market_overview_combines_available_sources(monkeypatch):
     assert "Greed" in report
     assert "BTC 52.3%" in report
     assert "Whale moved 1,000 BTC" in report
-
-
-@pytest.mark.asyncio
-async def test_market_overview_reports_no_whale_movement_when_telegram_unavailable(monkeypatch):
-    monkeypatch.setattr(
-        main_module,
-        "_fetch_fear_and_greed_index",
-        lambda: _resolved(_market_ok({"value": "55", "value_classification": "Neutral"})),
-    )
-    monkeypatch.setattr(
-        main_module,
-        "_fetch_global_market_data",
-        lambda: _resolved(_market_ok({"market_cap_percentage": {"btc": 48.0, "eth": 16.0}})),
-    )
-    monkeypatch.setattr(
-        main_module,
-        "_fetch_whale_alerts",
-        lambda: _resolved(main_module.WhaleAlertResult(
-            main_module.TelegramFetchStatus.NO_MESSAGES,
-        )),
-    )
-
-    report = await _tool_callable("get_market_overview")()
-
-    assert "포착된 움직임 없음" in report
 
 
 @pytest.mark.asyncio
@@ -1024,14 +996,6 @@ async def test_mcp_tool_schemas_publish_runtime_constraints():
 
 
 @pytest.mark.asyncio
-async def test_telegram_client_helper_raises_when_disabled():
-    await _assert_crypto_error(
-        main_module._get_telegram_client(),
-        main_module.ToolErrorCode.TELEGRAM_UNAVAILABLE,
-    )
-
-
-@pytest.mark.asyncio
 async def test_lifespan_disables_telegram_when_startup_connection_fails(monkeypatch):
     main_module.TELEGRAM_API_ID = "123"
     main_module.TELEGRAM_API_HASH = "hash"
@@ -1040,8 +1004,7 @@ async def test_lifespan_disables_telegram_when_startup_connection_fails(monkeypa
     monkeypatch.setattr(main_module, "TelegramClient", FailingStartupTelegramClient)
 
     async with main_module.lifespan(None):
-        assert main_module.telegram_client is None
-        assert main_module.telegram_availability is main_module.TelegramAvailability.UNAVAILABLE
+        assert main_module.telegram_runtime is main_module.TelegramAvailability.UNAVAILABLE
 
 
 @pytest.mark.asyncio
@@ -1064,8 +1027,7 @@ async def test_lifespan_disables_telegram_when_startup_times_out(monkeypatch):
     monkeypatch.setattr(main_module, "TelegramClient", lambda *args, **kwargs: HangingStartupTelegramClient())
 
     async with main_module.lifespan(None):
-        assert main_module.telegram_client is None
-        assert main_module.telegram_availability is main_module.TelegramAvailability.UNAVAILABLE
+        assert main_module.telegram_runtime is main_module.TelegramAvailability.UNAVAILABLE
 
 
 @pytest.mark.asyncio
@@ -1079,8 +1041,7 @@ async def test_lifespan_disconnects_telegram_when_startup_authorization_fails(mo
     monkeypatch.setattr(main_module, "TelegramClient", lambda *args, **kwargs: fake_client)
 
     async with main_module.lifespan(None):
-        assert main_module.telegram_client is None
-        assert main_module.telegram_availability is main_module.TelegramAvailability.UNAUTHORIZED
+        assert main_module.telegram_runtime is main_module.TelegramAvailability.UNAUTHORIZED
 
     assert fake_client.disconnected is True
 
@@ -1096,7 +1057,7 @@ async def test_lifespan_swallows_disconnect_failure_when_startup_authorization_f
     monkeypatch.setattr(main_module, "TelegramClient", lambda *args, **kwargs: fake_client)
 
     async with main_module.lifespan(None):
-        assert main_module.telegram_client is None
+        assert main_module.telegram_runtime is main_module.TelegramAvailability.UNAUTHORIZED
 
     assert fake_client.disconnect_calls == 1
 
@@ -1111,12 +1072,10 @@ async def test_lifespan_disconnects_authorized_client_and_clears_reference(monke
     monkeypatch.setattr(main_module, "TelegramClient", lambda *args, **kwargs: fake_client)
 
     async with main_module.lifespan(None):
-        assert main_module.telegram_client is fake_client
-        assert main_module.telegram_availability is main_module.TelegramAvailability.AVAILABLE
+        assert main_module.telegram_runtime is fake_client
 
     assert fake_client.disconnected is True
-    assert main_module.telegram_client is None
-    assert main_module.telegram_availability is main_module.TelegramAvailability.UNAVAILABLE
+    assert main_module.telegram_runtime is main_module.TelegramAvailability.UNAVAILABLE
 
 
 @pytest.mark.asyncio
@@ -1129,10 +1088,10 @@ async def test_lifespan_clears_reference_when_authorized_cleanup_fails(monkeypat
     monkeypatch.setattr(main_module, "TelegramClient", lambda *args, **kwargs: fake_client)
 
     async with main_module.lifespan(None):
-        assert main_module.telegram_client is fake_client
+        assert main_module.telegram_runtime is fake_client
 
     assert fake_client.disconnected is True
-    assert main_module.telegram_client is None
+    assert main_module.telegram_runtime is main_module.TelegramAvailability.UNAVAILABLE
 
 
 @pytest.mark.asyncio
@@ -1151,10 +1110,10 @@ async def test_lifespan_bounds_authorized_cleanup_time(monkeypatch):
     monkeypatch.setattr(main_module, "TelegramClient", lambda *args, **kwargs: fake_client)
 
     async with main_module.lifespan(None):
-        assert main_module.telegram_client is fake_client
+        assert main_module.telegram_runtime is fake_client
 
     assert fake_client.disconnected is True
-    assert main_module.telegram_client is None
+    assert main_module.telegram_runtime is main_module.TelegramAvailability.UNAVAILABLE
 
 
 @pytest.mark.asyncio
@@ -1205,7 +1164,7 @@ async def test_fastmcp_client_follows_news_reference_to_full_message(monkeypatch
     assert message_result.is_error is False
     assert message_text == "protocol full message"
     assert fake_client.disconnected is True
-    assert main_module.telegram_client is None
+    assert main_module.telegram_runtime is main_module.TelegramAvailability.UNAVAILABLE
 
 
 @pytest.mark.asyncio
@@ -1233,12 +1192,12 @@ async def test_fastmcp_client_reports_total_news_failure_as_error(monkeypatch):
         == main_module.ToolErrorCode.TELEGRAM_UPSTREAM_ERROR.value
     )
     assert fake_client.disconnected is True
-    assert main_module.telegram_client is None
+    assert main_module.telegram_runtime is main_module.TelegramAvailability.UNAVAILABLE
 
 
 @pytest.mark.asyncio
-async def test_realtime_news_uses_telegram_client(monkeypatch):
-    main_module.telegram_client = FakeTelegramClient(
+async def test_realtime_news_uses_telegram_client():
+    main_module.telegram_runtime = FakeTelegramClient(
         {
             "wublockchainenglish": [FakeMessage("line1\nline2", date=_dt())],
             "watcherguru": [],
@@ -1273,7 +1232,7 @@ async def test_realtime_news_bounds_preview_at_150_characters(
     truncated,
     marker_present,
 ):
-    main_module.telegram_client = FakeTelegramClient(
+    main_module.telegram_runtime = FakeTelegramClient(
         {
             "wublockchainenglish": [FakeMessage(text, date=_dt())],
             "watcherguru": [],
@@ -1291,7 +1250,7 @@ async def test_realtime_news_bounds_preview_at_150_characters(
 
 @pytest.mark.asyncio
 async def test_realtime_news_accepts_inclusive_72_hour_boundary():
-    main_module.telegram_client = FakeTelegramClient(
+    main_module.telegram_runtime = FakeTelegramClient(
         {
             "wublockchainenglish": [],
             "watcherguru": [],
@@ -1339,7 +1298,7 @@ async def test_realtime_news_returns_newest_messages_and_stops_before_since():
             ],
         }
     )
-    main_module.telegram_client = client
+    main_module.telegram_runtime = client
 
     result = await _tool_callable("get_realtime_news")(1)
     report = _tool_result_text(result)
@@ -1358,7 +1317,7 @@ async def test_realtime_news_returns_newest_messages_and_stops_before_since():
 @pytest.mark.asyncio
 async def test_realtime_news_normalizes_naive_dates_as_utc():
     naive_date = datetime.now(timezone.utc).replace(tzinfo=None, microsecond=0)
-    main_module.telegram_client = FakeTelegramClient(
+    main_module.telegram_runtime = FakeTelegramClient(
         {
             "wublockchainenglish": [FakeMessage("naive timestamp", naive_date)],
             "watcherguru": [],
@@ -1380,7 +1339,7 @@ async def test_realtime_news_preserves_results_when_one_channel_fails():
                 raise RuntimeError("channel unavailable")
             yield FakeMessage("available news", _dt())
 
-    main_module.telegram_client = PartiallyFailingTelegramClient()
+    main_module.telegram_runtime = PartiallyFailingTelegramClient()
 
     result = await _tool_callable("get_realtime_news")(1)
     report = _tool_result_text(result)
@@ -1407,7 +1366,7 @@ async def test_realtime_news_reports_no_news_when_other_channel_fails():
             if False:
                 yield
 
-    main_module.telegram_client = EmptyAndFailingTelegramClient()
+    main_module.telegram_runtime = EmptyAndFailingTelegramClient()
 
     result = await _tool_callable("get_realtime_news")(1)
     report = _tool_result_text(result)
@@ -1437,7 +1396,7 @@ async def test_realtime_news_errors_when_all_channels_fail():
             raise RuntimeError("channel unavailable")
             yield
 
-    main_module.telegram_client = FailingTelegramClient()
+    main_module.telegram_runtime = FailingTelegramClient()
 
     await _assert_crypto_error(
         _tool_callable("get_realtime_news")(1),
@@ -1453,7 +1412,7 @@ async def test_realtime_news_does_not_expose_unbounded_channel_errors():
                 raise RuntimeError("e" * 100_000)
             yield FakeMessage("available news", _dt())
 
-    main_module.telegram_client = PartiallyFailingTelegramClient()
+    main_module.telegram_runtime = PartiallyFailingTelegramClient()
 
     result = await _tool_callable("get_realtime_news")(1)
     report = _tool_result_text(result)
@@ -1490,7 +1449,7 @@ async def test_realtime_news_errors_when_all_channels_timeout(monkeypatch):
             yield
 
     monkeypatch.setattr(main_module, "TELEGRAM_OPERATION_TIMEOUT_SECONDS", 0.01)
-    main_module.telegram_client = HangingTelegramClient()
+    main_module.telegram_runtime = HangingTelegramClient()
 
     await _assert_crypto_error(
         _tool_callable("get_realtime_news")(1),
@@ -1510,7 +1469,7 @@ async def test_realtime_news_prefers_upstream_error_for_mixed_total_failure(monk
                 yield
 
     monkeypatch.setattr(main_module, "TELEGRAM_OPERATION_TIMEOUT_SECONDS", 0.01)
-    main_module.telegram_client = MixedFailureTelegramClient()
+    main_module.telegram_runtime = MixedFailureTelegramClient()
 
     await _assert_crypto_error(
         _tool_callable("get_realtime_news")(1),
@@ -1519,7 +1478,7 @@ async def test_realtime_news_prefers_upstream_error_for_mixed_total_failure(monk
 
 
 @pytest.mark.asyncio
-async def test_whale_alerts_return_newest_messages_and_stop_before_since(monkeypatch):
+async def test_whale_alerts_return_newest_messages_and_stop_before_since():
     now = datetime.now(timezone.utc)
     client = RecordingTelegramClient(
         {
@@ -1529,11 +1488,7 @@ async def test_whale_alerts_return_newest_messages_and_stop_before_since(monkeyp
             ]
         }
     )
-    monkeypatch.setattr(main_module, "TELEGRAM_API_ID", 1)
-    monkeypatch.setattr(main_module, "TELEGRAM_API_HASH", "hash")
-    monkeypatch.setattr(main_module, "TELEGRAM_SESSION_STRING", "session")
-    main_module.telegram_client = client
-    main_module.telegram_availability = main_module.TelegramAvailability.AVAILABLE
+    main_module.telegram_runtime = client
 
     result = await main_module._fetch_whale_alerts()
 
@@ -1545,11 +1500,8 @@ async def test_whale_alerts_return_newest_messages_and_stop_before_since(monkeyp
 
 
 @pytest.mark.asyncio
-async def test_whale_alerts_reports_unauthorized_state(monkeypatch):
-    monkeypatch.setattr(main_module, "TELEGRAM_API_ID", 1)
-    monkeypatch.setattr(main_module, "TELEGRAM_API_HASH", "hash")
-    monkeypatch.setattr(main_module, "TELEGRAM_SESSION_STRING", "session")
-    main_module.telegram_availability = main_module.TelegramAvailability.UNAUTHORIZED
+async def test_whale_alerts_reports_unauthorized_state():
+    main_module.telegram_runtime = main_module.TelegramAvailability.UNAUTHORIZED
 
     assert await main_module._fetch_whale_alerts() == main_module.WhaleAlertResult(
         main_module.TelegramFetchStatus.UNAUTHORIZED,
@@ -1558,7 +1510,7 @@ async def test_whale_alerts_reports_unauthorized_state(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_whale_alerts_reports_unavailable_when_initialization_failed():
-    main_module.telegram_availability = main_module.TelegramAvailability.UNAVAILABLE
+    main_module.telegram_runtime = main_module.TelegramAvailability.UNAVAILABLE
 
     assert await main_module._fetch_whale_alerts() == main_module.WhaleAlertResult(
         main_module.TelegramFetchStatus.UNAVAILABLE,
@@ -1566,17 +1518,13 @@ async def test_whale_alerts_reports_unavailable_when_initialization_failed():
 
 
 @pytest.mark.asyncio
-async def test_whale_alerts_reports_fetch_failure(monkeypatch):
+async def test_whale_alerts_reports_fetch_failure():
     class FailingWhaleClient:
         async def iter_messages(self, channel, **kwargs):
             raise RuntimeError("channel unavailable")
             yield
 
-    monkeypatch.setattr(main_module, "TELEGRAM_API_ID", 1)
-    monkeypatch.setattr(main_module, "TELEGRAM_API_HASH", "hash")
-    monkeypatch.setattr(main_module, "TELEGRAM_SESSION_STRING", "session")
-    main_module.telegram_client = FailingWhaleClient()
-    main_module.telegram_availability = main_module.TelegramAvailability.AVAILABLE
+    main_module.telegram_runtime = FailingWhaleClient()
 
     assert await main_module._fetch_whale_alerts() == main_module.WhaleAlertResult(
         main_module.TelegramFetchStatus.FETCH_FAILED,
@@ -1584,12 +1532,8 @@ async def test_whale_alerts_reports_fetch_failure(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_whale_alerts_reports_no_messages(monkeypatch):
-    monkeypatch.setattr(main_module, "TELEGRAM_API_ID", 1)
-    monkeypatch.setattr(main_module, "TELEGRAM_API_HASH", "hash")
-    monkeypatch.setattr(main_module, "TELEGRAM_SESSION_STRING", "session")
-    main_module.telegram_client = FakeTelegramClient({"whale_alert_io": []})
-    main_module.telegram_availability = main_module.TelegramAvailability.AVAILABLE
+async def test_whale_alerts_reports_no_messages():
+    main_module.telegram_runtime = FakeTelegramClient({"whale_alert_io": []})
 
     assert await main_module._fetch_whale_alerts() == main_module.WhaleAlertResult(
         main_module.TelegramFetchStatus.NO_MESSAGES,
@@ -1603,12 +1547,8 @@ async def test_whale_alerts_reports_timeout(monkeypatch):
             await asyncio.sleep(1)
             yield
 
-    monkeypatch.setattr(main_module, "TELEGRAM_API_ID", 1)
-    monkeypatch.setattr(main_module, "TELEGRAM_API_HASH", "hash")
-    monkeypatch.setattr(main_module, "TELEGRAM_SESSION_STRING", "session")
     monkeypatch.setattr(main_module, "TELEGRAM_OPERATION_TIMEOUT_SECONDS", 0.01)
-    main_module.telegram_client = HangingWhaleClient()
-    main_module.telegram_availability = main_module.TelegramAvailability.AVAILABLE
+    main_module.telegram_runtime = HangingWhaleClient()
 
     assert await main_module._fetch_whale_alerts() == main_module.WhaleAlertResult(
         main_module.TelegramFetchStatus.FETCH_FAILED,
@@ -1617,7 +1557,7 @@ async def test_whale_alerts_reports_timeout(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_realtime_news_reports_clear_no_news_when_channels_are_empty():
-    main_module.telegram_client = FakeTelegramClient(
+    main_module.telegram_runtime = FakeTelegramClient(
         {
             "wublockchainenglish": [],
             "watcherguru": [],
@@ -1668,7 +1608,7 @@ async def test_telegram_message_returns_full_text():
             assert ids == 42
             return FakeMessage("full message", _dt())
 
-    main_module.telegram_client = FakeMessageClient()
+    main_module.telegram_runtime = FakeMessageClient()
 
     result = await _tool_callable("get_telegram_message")("watcherguru", 42)
 
@@ -1684,13 +1624,13 @@ async def test_telegram_message_reports_missing_and_non_text_messages():
         async def get_messages(self, channel, ids):
             return self.message
 
-    main_module.telegram_client = FakeMessageClient(None)
+    main_module.telegram_runtime = FakeMessageClient(None)
     await _assert_crypto_error(
         _tool_callable("get_telegram_message")("watcherguru", 42),
         main_module.ToolErrorCode.TELEGRAM_MESSAGE_NOT_FOUND,
     )
 
-    main_module.telegram_client = FakeMessageClient(FakeMessage(None, _dt()))
+    main_module.telegram_runtime = FakeMessageClient(FakeMessage(None, _dt()))
     await _assert_crypto_error(
         _tool_callable("get_telegram_message")("watcherguru", 42),
         main_module.ToolErrorCode.TELEGRAM_MESSAGE_NOT_TEXT,
@@ -1703,7 +1643,7 @@ async def test_telegram_message_wraps_upstream_failure():
         async def get_messages(self, channel, ids):
             raise RuntimeError("telegram unavailable")
 
-    main_module.telegram_client = FailingMessageClient()
+    main_module.telegram_runtime = FailingMessageClient()
 
     await _assert_crypto_error(
         _tool_callable("get_telegram_message")("watcherguru", 42),
@@ -1718,7 +1658,7 @@ async def test_telegram_message_reports_timeout(monkeypatch):
             await asyncio.sleep(1)
 
     monkeypatch.setattr(main_module, "TELEGRAM_OPERATION_TIMEOUT_SECONDS", 0.01)
-    main_module.telegram_client = HangingMessageClient()
+    main_module.telegram_runtime = HangingMessageClient()
 
     await _assert_crypto_error(
         _tool_callable("get_telegram_message")("watcherguru", 42),

@@ -20,9 +20,6 @@ from pydantic import (
     BaseModel,
     Field,
     StrictInt,
-    StrictStr,
-    ValidationError,
-    field_validator,
 )
 
 # --- 설정 및 전역 변수 초기화 ---
@@ -47,11 +44,12 @@ TELEGRAM_API_ID = _get_int_env("TELEGRAM_API_ID")
 TELEGRAM_API_HASH = os.getenv("TELEGRAM_API_HASH")
 TELEGRAM_SESSION_STRING = os.getenv("TELEGRAM_SESSION_STRING")
 
-ALLOWED_TELEGRAM_CHANNELS = {
+NEWS_CHANNELS = (
     "wublockchainenglish",
     "watcherguru",
-    "whale_alert_io",
-}
+)
+WHALE_ALERT_CHANNEL = "whale_alert_io"
+ALLOWED_TELEGRAM_CHANNELS = {*NEWS_CHANNELS, WHALE_ALERT_CHANNEL}
 TelegramChannel = Annotated[
     str,
     Field(json_schema_extra={"enum": sorted(ALLOWED_TELEGRAM_CHANNELS)}),
@@ -117,7 +115,6 @@ class TelegramAvailability(StrEnum):
     NOT_CONFIGURED = "not_configured"
     UNAUTHORIZED = "unauthorized"
     UNAVAILABLE = "unavailable"
-    AVAILABLE = "available"
 
 
 class TelegramFetchStatus(StrEnum):
@@ -161,17 +158,6 @@ class RealtimeNewsOutput(BaseModel):
     failed_channels: list[NewsChannelFailure]
 
 
-class CoinDetailsIdentity(BaseModel):
-    name: StrictStr
-
-    @field_validator("name")
-    @classmethod
-    def require_non_blank_name(cls, value: str) -> str:
-        if not value.strip():
-            raise ValueError("coin name must not be blank")
-        return value
-
-
 @dataclass(frozen=True)
 class WhaleAlertResult:
     status: TelegramFetchStatus
@@ -203,8 +189,7 @@ NEWS_CHANNEL_FAILURE_MESSAGES: dict[NewsChannelFailureCode, str] = {
     NewsChannelFailureCode.UPSTREAM_ERROR: "채널을 조회할 수 없습니다.",
 }
 
-telegram_client: TelegramClient | None = None
-telegram_availability = (
+telegram_runtime: TelegramClient | TelegramAvailability = (
     TelegramAvailability.UNAVAILABLE
     if all([TELEGRAM_API_ID, TELEGRAM_API_HASH, TELEGRAM_SESSION_STRING])
     else TelegramAvailability.NOT_CONFIGURED
@@ -257,13 +242,6 @@ def _format_percentage(value) -> str:
     return "N/A"
 
 
-def _format_whale_alert(value: str) -> str:
-    cleaned = value.replace('\n', ' ').strip()
-    if len(cleaned) <= WHALE_ALERT_MAX_CHARS:
-        return cleaned
-    return cleaned[:WHALE_ALERT_MAX_CHARS - 3].rstrip() + "..."
-
-
 async def _disconnect_telegram_client(client):
     if not client:
         return False
@@ -285,12 +263,12 @@ async def lifespan(app: FastMCP):
     """
     서버 시작 시 초기화된 전역 텔레그램 클라이언트 인스턴스를 반환합니다.
     """
-    global telegram_client, telegram_availability
+    global telegram_runtime
     if not all([TELEGRAM_API_ID, TELEGRAM_API_HASH, TELEGRAM_SESSION_STRING]):
-        telegram_availability = TelegramAvailability.NOT_CONFIGURED
+        telegram_runtime = TelegramAvailability.NOT_CONFIGURED
         print("텔레그램 환경 변수가 설정되지않아 관련 기능이 비활성화됩니다.")
     else:
-        telegram_availability = TelegramAvailability.UNAVAILABLE
+        telegram_runtime = TelegramAvailability.UNAVAILABLE
         client = None
         try:
             print("Connecting to Telegram...")
@@ -301,32 +279,26 @@ async def lifespan(app: FastMCP):
             if not is_authorized:
                 print("텔레그램 인증이 필요합니다. 로컬에서 스크립트를 실행하여 세션 파일을 생성해주세요.")
                 await _disconnect_telegram_client(client)
-                telegram_client = None
-                telegram_availability = TelegramAvailability.UNAUTHORIZED
+                telegram_runtime = TelegramAvailability.UNAUTHORIZED
             else:
-                telegram_client = client
-                telegram_availability = TelegramAvailability.AVAILABLE
+                telegram_runtime = client
                 print("텔레그램 클라이언트 연결 완료.")
         except TimeoutError:
             print("텔레그램 초기화 시간이 초과되어 관련 기능이 비활성화됩니다.")
-            telegram_client = None
-            telegram_availability = TelegramAvailability.UNAVAILABLE
+            telegram_runtime = TelegramAvailability.UNAVAILABLE
             await _disconnect_telegram_client(client)
         except Exception as e:
             print(f"텔레그램 초기화 실패로 관련 기능이 비활성화됩니다: {e}")
-            telegram_client = None
-            telegram_availability = TelegramAvailability.UNAVAILABLE
+            telegram_runtime = TelegramAvailability.UNAVAILABLE
             await _disconnect_telegram_client(client)
     try:
         yield
     finally:
-        client = telegram_client
-        telegram_client = None
-        if telegram_availability is TelegramAvailability.AVAILABLE:
-            telegram_availability = TelegramAvailability.UNAVAILABLE
-        if client:
+        runtime = telegram_runtime
+        if not isinstance(runtime, TelegramAvailability):
+            telegram_runtime = TelegramAvailability.UNAVAILABLE
             print("Disconnecting from Telegram...")
-            if await _disconnect_telegram_client(client):
+            if await _disconnect_telegram_client(runtime):
                 print("텔레그램 클라이언트 연결 해제 완료.")
 
 # FastMCP 앱 인스턴스 생성
@@ -334,16 +306,16 @@ mcp = FastMCP("Intelligent Crypto Assistant", lifespan=lifespan)
 
 # --- 내부 헬퍼 함수 ---
 
-async def _get_telegram_client() -> TelegramClient:
+def _get_telegram_client() -> TelegramClient:
     """
     서버 시작 시 초기화된 전역 텔레그램 클라이언트 인스턴스를 반환합니다.
     """
-    if telegram_client is None:
+    if isinstance(telegram_runtime, TelegramAvailability):
         raise CryptoToolError(
             ToolErrorCode.TELEGRAM_UNAVAILABLE,
             TELEGRAM_UNAVAILABLE_MESSAGE,
         )
-    return telegram_client
+    return telegram_runtime
 
 async def _fetch_fear_and_greed_index() -> MarketSourceResult:
     """alternative.me에서 최신 공포 및 탐욕 지수를 비동기적으로 가져옵니다."""
@@ -415,16 +387,12 @@ def _as_utc(value: datetime) -> datetime:
 
 async def _fetch_whale_alerts() -> WhaleAlertResult:
     """텔레그램 'whale_alert_io' 채널에서 지난 1시간 동안의 메시지를 가져옵니다."""
-    if telegram_availability is TelegramAvailability.NOT_CONFIGURED:
+    runtime = telegram_runtime
+    if runtime is TelegramAvailability.NOT_CONFIGURED:
         return WhaleAlertResult(TelegramFetchStatus.NOT_CONFIGURED)
-    if telegram_availability is TelegramAvailability.UNAUTHORIZED:
+    if runtime is TelegramAvailability.UNAUTHORIZED:
         return WhaleAlertResult(TelegramFetchStatus.UNAUTHORIZED)
-    if telegram_availability is not TelegramAvailability.AVAILABLE:
-        return WhaleAlertResult(TelegramFetchStatus.UNAVAILABLE)
-
-    try:
-        client = await _get_telegram_client()
-    except CryptoToolError:
+    if isinstance(runtime, TelegramAvailability):
         return WhaleAlertResult(TelegramFetchStatus.UNAVAILABLE)
 
     messages_text: list[str] = []
@@ -432,7 +400,7 @@ async def _fetch_whale_alerts() -> WhaleAlertResult:
     try:
         # Telethon's default iteration is newest first, so the first older post ends the window.
         async with asyncio.timeout(TELEGRAM_OPERATION_TIMEOUT_SECONDS):
-            async for message in client.iter_messages('whale_alert_io', limit=5):
+            async for message in runtime.iter_messages(WHALE_ALERT_CHANNEL, limit=5):
                 if _is_before_since(message, since):
                     break
                 if message.text:
@@ -509,11 +477,16 @@ async def get_market_overview() -> str:
         _fetch_whale_alerts(),
         return_exceptions=True
     )
+    if not isinstance(fng_result, MarketSourceResult):
+        fng_result = MarketSourceResult(MarketSourceStatus.UNAVAILABLE)
+    if not isinstance(global_result, MarketSourceResult):
+        global_result = MarketSourceResult(MarketSourceStatus.UNAVAILABLE)
+    if not isinstance(whale_result, WhaleAlertResult):
+        whale_result = WhaleAlertResult(TelegramFetchStatus.FETCH_FAILED)
 
     report = ["현재 시장 개요 브리핑:"]
     if (
-        isinstance(fng_result, MarketSourceResult)
-        and fng_result.status is MarketSourceStatus.OK
+        fng_result.status is MarketSourceStatus.OK
         and isinstance(fng_result.data, dict)
         and fng_result.data
     ):
@@ -527,8 +500,7 @@ async def get_market_overview() -> str:
         report.append("- 시장 심리: Alternative.me 조회 실패로 확인 불가")
 
     if (
-        isinstance(global_result, MarketSourceResult)
-        and global_result.status is MarketSourceStatus.OK
+        global_result.status is MarketSourceStatus.OK
         and isinstance(global_result.data, dict)
         and isinstance(global_result.data.get('market_cap_percentage'), dict)
     ):
@@ -536,33 +508,27 @@ async def get_market_overview() -> str:
         btc_dom = _format_percentage(percentages.get('btc'))
         eth_dom = _format_percentage(percentages.get('eth'))
         report.append(f"- 시장 지배력: BTC {btc_dom}, ETH {eth_dom}")
-    elif not (
-        isinstance(global_result, MarketSourceResult)
-        and global_result.status is MarketSourceStatus.NOT_CONFIGURED
-    ):
+    elif global_result.status is not MarketSourceStatus.NOT_CONFIGURED:
         report.append("- 시장 지배력: CoinGecko 조회 실패로 확인 불가")
 
-    if isinstance(whale_result, Exception):
+    if whale_result.status is TelegramFetchStatus.FETCH_FAILED:
         report.append("- 주요 자금 이동: Telegram 조회 실패로 확인 불가")
-    elif isinstance(whale_result, WhaleAlertResult):
-        if whale_result.status is TelegramFetchStatus.FETCH_FAILED:
-            report.append("- 주요 자금 이동: Telegram 조회 실패로 확인 불가")
-        elif whale_result.status is TelegramFetchStatus.UNAUTHORIZED:
-            report.append("- 주요 자금 이동: Telegram 인증에 실패하여 확인 불가")
-        elif whale_result.status is TelegramFetchStatus.UNAVAILABLE:
-            report.append("- 주요 자금 이동: Telegram을 사용할 수 없어 확인 불가")
-        elif whale_result.status is TelegramFetchStatus.NOT_CONFIGURED:
-            report.append("- 주요 자금 이동: Telegram이 설정되지 않아 확인 불가")
-        elif whale_result.status is TelegramFetchStatus.NO_MESSAGES:
-            report.append("- 주요 자금 이동: 최근 1시간 내 포착된 움직임 없음")
-        elif whale_result.status is TelegramFetchStatus.OK and whale_result.messages:
-            report.append("- 주요 자금 이동 (지난 1시간):")
-            for alert in whale_result.messages:
-                report.append(f"  - {_format_whale_alert(alert)}")
-        else:
-            report.append("- 주요 자금 이동: 포착된 움직임 없음")
+    elif whale_result.status is TelegramFetchStatus.UNAUTHORIZED:
+        report.append("- 주요 자금 이동: Telegram 인증에 실패하여 확인 불가")
+    elif whale_result.status is TelegramFetchStatus.UNAVAILABLE:
+        report.append("- 주요 자금 이동: Telegram을 사용할 수 없어 확인 불가")
+    elif whale_result.status is TelegramFetchStatus.NOT_CONFIGURED:
+        report.append("- 주요 자금 이동: Telegram이 설정되지 않아 확인 불가")
+    elif whale_result.status is TelegramFetchStatus.NO_MESSAGES:
+        report.append("- 주요 자금 이동: 최근 1시간 내 포착된 움직임 없음")
+    elif whale_result.status is TelegramFetchStatus.OK and whale_result.messages:
+        report.append("- 주요 자금 이동 (지난 1시간):")
+        for alert in whale_result.messages:
+            report.append(
+                f"  - {_bounded_text(alert, WHALE_ALERT_MAX_CHARS, default='')}"
+            )
     else:
-        report.append("- 주요 자금 이동: Telegram 조회 실패로 확인 불가")
+        report.append("- 주요 자금 이동: 포착된 움직임 없음")
 
     return "\n".join(report)
 
@@ -595,16 +561,6 @@ async def get_coin_details(coin_id: CoinGeckoId | None = None) -> str:
             response.raise_for_status()
             details = response.json()
 
-        try:
-            CoinDetailsIdentity.model_validate(details)
-        except ValidationError:
-            print(f"CoinGecko coin detail payload invalid for {coin_id}.")
-            raise CryptoToolError(
-                ToolErrorCode.COINGECKO_UPSTREAM_ERROR,
-                f"'{coin_id}' 정보 응답을 확인할 수 없습니다.",
-            )
-
-        return _format_coin_details(details)
     except httpx.HTTPStatusError as e:
         if e.response.status_code == 404:
             raise CryptoToolError(
@@ -616,14 +572,21 @@ async def get_coin_details(coin_id: CoinGeckoId | None = None) -> str:
             ToolErrorCode.COINGECKO_UPSTREAM_ERROR,
             f"'{coin_id}' 정보 조회 중 CoinGecko API 오류가 발생했습니다.",
         )
-    except CryptoToolError:
-        raise
     except Exception as e:
         print(f"CoinGecko coin detail fetch error for {coin_id}: {e}")
         raise CryptoToolError(
             ToolErrorCode.COINGECKO_UPSTREAM_ERROR,
             f"'{coin_id}' 정보를 가져오는 데 실패했습니다.",
         )
+
+    name = details.get("name") if isinstance(details, dict) else None
+    if not isinstance(name, str) or not name.strip():
+        print(f"CoinGecko coin detail payload invalid for {coin_id}.")
+        raise CryptoToolError(
+            ToolErrorCode.COINGECKO_UPSTREAM_ERROR,
+            f"'{coin_id}' 정보 응답을 확인할 수 없습니다.",
+        )
+    return _format_coin_details(details)
 
 
 # FastMCP validates required arguments before tool code. Keep the public schema
@@ -655,10 +618,10 @@ async def get_realtime_news(hours: NewsHours = 1) -> ToolResult:
             "'hours' 파라미터는 1과 72 사이의 값이어야 합니다.",
         )
 
-    channels = ['wublockchainenglish', 'watcherguru']
+    channels = NEWS_CHANNELS
     since = datetime.now(timezone.utc) - timedelta(hours=hours)
 
-    client = await _get_telegram_client()
+    client = _get_telegram_client()
 
     tasks = [_fetch_news_channel(client, ch, since) for ch in channels]
     results = await asyncio.gather(*tasks)
@@ -757,35 +720,33 @@ async def get_telegram_message(
             "'message_id' 파라미터는 1 이상의 정수여야 합니다.",
         )
 
-    client = await _get_telegram_client()
+    client = _get_telegram_client()
 
     try:
         async with asyncio.timeout(TELEGRAM_OPERATION_TIMEOUT_SECONDS):
             msg = await client.get_messages(channel, ids=message_id)
-        if not msg:
-            raise CryptoToolError(
-                ToolErrorCode.TELEGRAM_MESSAGE_NOT_FOUND,
-                f"채널 '{channel}'에서 메시지 ID {message_id}를 찾을 수 없습니다.",
-            )
-        if not msg.text:
-            raise CryptoToolError(
-                ToolErrorCode.TELEGRAM_MESSAGE_NOT_TEXT,
-                f"메시지 ID {message_id}는 텍스트 콘텐츠를 포함하지 않습니다.",
-            )
-        return msg.text
     except TimeoutError:
         raise CryptoToolError(
             ToolErrorCode.TELEGRAM_TIMEOUT,
             "Telegram 메시지 조회 시간이 초과되었습니다.",
         )
-    except CryptoToolError:
-        raise
     except Exception as e:
         print(f"Telegram message fetch error for {channel}#{message_id}: {e}")
         raise CryptoToolError(
             ToolErrorCode.TELEGRAM_UPSTREAM_ERROR,
             "메시지 조회 중 Telegram 오류가 발생했습니다.",
         )
+    if not msg:
+        raise CryptoToolError(
+            ToolErrorCode.TELEGRAM_MESSAGE_NOT_FOUND,
+            f"채널 '{channel}'에서 메시지 ID {message_id}를 찾을 수 없습니다.",
+        )
+    if not msg.text:
+        raise CryptoToolError(
+            ToolErrorCode.TELEGRAM_MESSAGE_NOT_TEXT,
+            f"메시지 ID {message_id}는 텍스트 콘텐츠를 포함하지 않습니다.",
+        )
+    return msg.text
 
 
 def run() -> int:
