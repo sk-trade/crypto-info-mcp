@@ -2,6 +2,17 @@
 
 All notable changes to this project are documented in this file.
 
+## [0.2.1] - 2026-08-15
+
+### Changed
+
+- Simplified Telegram runtime state and market-result handling without changing MCP contracts.
+- Updated the conversational example to the current Google Gen AI SDK while preserving MCP JSON Schema constraints.
+
+### Fixed
+
+- Fixed conversational tool calls, EOF shutdown, and missing `google-genai` dependency guidance.
+
 ## [0.2.0] - 2026-07-19
 
 ### Added
