@@ -1,187 +1,82 @@
+"""FastMCP entry point for read-only cryptocurrency market context."""
+
 import asyncio
-from contextlib import asynccontextmanager
-from dataclasses import dataclass
-from enum import StrEnum
+import logging
 import os
-import re
-from datetime import datetime, timedelta, timezone
-from typing import Annotated
+from collections.abc import Awaitable
+from contextlib import asynccontextmanager
+from datetime import UTC, datetime, timedelta
+from typing import cast
 
 import httpx
 from dotenv import load_dotenv
+from fastmcp import FastMCP
+from fastmcp.tools.tool import ToolResult
+from mcp.types import TextContent
 from telethon import TelegramClient
 from telethon.sessions import StringSession
 
-from fastmcp import FastMCP
-from fastmcp.exceptions import ToolError
-from fastmcp.tools.tool import ToolResult
-from mcp.types import TextContent
-from pydantic import (
-    BaseModel,
-    Field,
-    StrictInt,
+from src.contracts import (
+    ALLOWED_TELEGRAM_CHANNELS,
+    COIN_ID_JSON_SCHEMA,
+    COIN_ID_MAX_CHARS,
+    COIN_ID_PATTERN,
+    MARKET_LABEL_MAX_CHARS,
+    NEWS_CHANNELS,
+    NEWS_LOOKBACK_MAX_HOURS,
+    NEWS_LOOKBACK_MIN_HOURS,
+    NEWS_PREVIEW_MAX_CHARS,
+    WHALE_ALERT_CHANNEL,
+    WHALE_ALERT_MAX_CHARS,
+    CoinGeckoId,
+    CryptoToolError,
+    MarketSourceResult,
+    MarketSourceStatus,
+    NewsChannelFailure,
+    NewsChannelFailureCode,
+    NewsChannelResult,
+    NewsHours,
+    NewsMessage,
+    NewsPreview,
+    RealtimeNewsOutput,
+    TelegramAvailability,
+    TelegramChannel,
+    TelegramFetchStatus,
+    TelegramMessageId,
+    ToolErrorCode,
+    WhaleAlertResult,
+)
+from src.formatting import (
+    bounded_text as _bounded_text,
+)
+from src.formatting import (
+    format_coin_details as _format_coin_details,
+)
+from src.formatting import (
+    format_percentage as _format_percentage,
 )
 
-# --- 설정 및 전역 변수 초기화 ---
 load_dotenv()
 
-# API 키 및 설정 로드
-COINGECKO_API_KEY = os.getenv("COINGECKO_API_KEY")
+logger = logging.getLogger(__name__)
 
+ALTERNATIVE_ME_FEAR_AND_GREED_URL = "https://api.alternative.me/fng/?limit=1"
+COINGECKO_GLOBAL_MARKET_URL = "https://api.coingecko.com/api/v3/global"
+COINGECKO_COIN_DETAILS_URL = "https://api.coingecko.com/api/v3/coins/{coin_id}"
+COINGECKO_NOT_FOUND_STATUS = 404
+HTTP_REQUEST_TIMEOUT_SECONDS = 10.0
+TELEGRAM_OPERATION_TIMEOUT_SECONDS = 10
+TELEGRAM_CLEANUP_TIMEOUT_SECONDS = 5
+TELEGRAM_NEWS_MESSAGE_LIMIT = 10
+TELEGRAM_WHALE_MESSAGE_LIMIT = 5
+SERVER_HOST = "0.0.0.0"
+SERVER_PORT = 8123
 
-def _get_int_env(name: str) -> int | None:
-    value = os.getenv(name)
-    if not value:
-        return None
-    try:
-        return int(value)
-    except ValueError:
-        print(f"{name} must be an integer.")
-        return None
-
-
-TELEGRAM_API_ID = _get_int_env("TELEGRAM_API_ID")
-TELEGRAM_API_HASH = os.getenv("TELEGRAM_API_HASH")
-TELEGRAM_SESSION_STRING = os.getenv("TELEGRAM_SESSION_STRING")
-
-NEWS_CHANNELS = (
-    "wublockchainenglish",
-    "watcherguru",
-)
-WHALE_ALERT_CHANNEL = "whale_alert_io"
-ALLOWED_TELEGRAM_CHANNELS = {*NEWS_CHANNELS, WHALE_ALERT_CHANNEL}
-TelegramChannel = Annotated[
-    str,
-    Field(json_schema_extra={"enum": sorted(ALLOWED_TELEGRAM_CHANNELS)}),
-]
 TELEGRAM_UNAVAILABLE_MESSAGE = (
     "텔레그램을 사용할 수 없습니다. 서버 운영자는 TELEGRAM_API_ID, "
     "TELEGRAM_API_HASH, TELEGRAM_SESSION_STRING 설정과 "
     "`uv run python scripts/generate_session.py`로 생성한 인증 세션을 확인해주세요."
 )
-TELEGRAM_OPERATION_TIMEOUT_SECONDS = 10
-TELEGRAM_CLEANUP_TIMEOUT_SECONDS = 5
-
-WHALE_ALERT_MAX_CHARS = 300
-MARKET_LABEL_MAX_CHARS = 100
-COIN_NAME_MAX_CHARS = 120
-COIN_SYMBOL_MAX_CHARS = 20
-HOMEPAGE_MAX_CHARS = 500
-COIN_ID_MAX_CHARS = 200
-COIN_ID_PATTERN = re.compile(r"^[A-Za-z0-9_-]+$")
-COIN_ID_JSON_SCHEMA = {
-    "minLength": 1,
-    "maxLength": COIN_ID_MAX_CHARS,
-    "pattern": COIN_ID_PATTERN.pattern,
-}
-CoinGeckoId = Annotated[
-    str,
-    Field(json_schema_extra=COIN_ID_JSON_SCHEMA),
-]
-NewsHours = Annotated[
-    StrictInt,
-    Field(json_schema_extra={"minimum": 1, "maximum": 72}),
-]
-TelegramMessageId = Annotated[
-    StrictInt,
-    Field(json_schema_extra={"minimum": 1}),
-]
-
-
-class ToolErrorCode(StrEnum):
-    COIN_ID_REQUIRED = "coin_id_required"
-    COIN_ID_INVALID = "coin_id_invalid"
-    COINGECKO_API_KEY_MISSING = "coingecko_api_key_missing"
-    COIN_NOT_FOUND = "coin_not_found"
-    COINGECKO_UPSTREAM_ERROR = "coingecko_upstream_error"
-    NEWS_HOURS_INVALID = "news_hours_invalid"
-    TELEGRAM_UNAVAILABLE = "telegram_unavailable"
-    TELEGRAM_CHANNEL_NOT_ALLOWED = "telegram_channel_not_allowed"
-    TELEGRAM_MESSAGE_ID_INVALID = "telegram_message_id_invalid"
-    TELEGRAM_MESSAGE_NOT_FOUND = "telegram_message_not_found"
-    TELEGRAM_MESSAGE_NOT_TEXT = "telegram_message_not_text"
-    TELEGRAM_TIMEOUT = "telegram_timeout"
-    TELEGRAM_UPSTREAM_ERROR = "telegram_upstream_error"
-
-
-class CryptoToolError(ToolError):
-    def __init__(self, code: ToolErrorCode, message: str):
-        self.code = code
-        self.message = message
-        super().__init__(f"{code.value}: {message}")
-
-
-class TelegramAvailability(StrEnum):
-    NOT_CONFIGURED = "not_configured"
-    UNAUTHORIZED = "unauthorized"
-    UNAVAILABLE = "unavailable"
-
-
-class TelegramFetchStatus(StrEnum):
-    NOT_CONFIGURED = "not_configured"
-    UNAUTHORIZED = "unauthorized"
-    UNAVAILABLE = "unavailable"
-    FETCH_FAILED = "fetch_failed"
-    NO_MESSAGES = "no_messages"
-    OK = "ok"
-
-
-class MarketSourceStatus(StrEnum):
-    NOT_CONFIGURED = "not_configured"
-    UNAVAILABLE = "unavailable"
-    OK = "ok"
-
-
-class NewsChannelFailureCode(StrEnum):
-    INVALID_MESSAGE_REFERENCE = "invalid_message_reference"
-    TIMEOUT = "timeout"
-    UPSTREAM_ERROR = "upstream_error"
-
-
-class NewsPreview(BaseModel):
-    channel: str
-    message_id: int
-    timestamp: str
-    preview: str
-    truncated: bool
-
-
-class NewsChannelFailure(BaseModel):
-    channel: str
-    code: NewsChannelFailureCode
-    message: str
-
-
-class RealtimeNewsOutput(BaseModel):
-    hours: int
-    messages: list[NewsPreview]
-    failed_channels: list[NewsChannelFailure]
-
-
-@dataclass(frozen=True)
-class WhaleAlertResult:
-    status: TelegramFetchStatus
-    messages: tuple[str, ...] = ()
-
-
-@dataclass(frozen=True)
-class MarketSourceResult:
-    status: MarketSourceStatus
-    data: dict | None = None
-
-
-@dataclass(frozen=True)
-class NewsMessage:
-    date: datetime
-    item: NewsPreview
-
-
-@dataclass(frozen=True)
-class NewsChannelResult:
-    channel: str
-    messages: tuple[NewsMessage, ...]
-    failure: NewsChannelFailureCode | None = None
-
 
 NEWS_CHANNEL_FAILURE_MESSAGES: dict[NewsChannelFailureCode, str] = {
     NewsChannelFailureCode.INVALID_MESSAGE_REFERENCE: "메시지 참조를 확인할 수 없습니다.",
@@ -189,231 +84,295 @@ NEWS_CHANNEL_FAILURE_MESSAGES: dict[NewsChannelFailureCode, str] = {
     NewsChannelFailureCode.UPSTREAM_ERROR: "채널을 조회할 수 없습니다.",
 }
 
-telegram_runtime: TelegramClient | TelegramAvailability = (
+WHALE_ALERT_STATUS_MESSAGES: dict[TelegramFetchStatus, str] = {
+    TelegramFetchStatus.FETCH_FAILED: "- 주요 자금 이동: Telegram 조회 실패로 확인 불가",
+    TelegramFetchStatus.UNAUTHORIZED: "- 주요 자금 이동: Telegram 인증에 실패하여 확인 불가",
+    TelegramFetchStatus.UNAVAILABLE: "- 주요 자금 이동: Telegram을 사용할 수 없어 확인 불가",
+    TelegramFetchStatus.NOT_CONFIGURED: "- 주요 자금 이동: Telegram이 설정되지 않아 확인 불가",
+    TelegramFetchStatus.NO_MESSAGES: "- 주요 자금 이동: 최근 1시간 내 포착된 움직임 없음",
+}
+
+
+def _read_optional_int_env(name: str) -> int | None:
+    raw_value = os.getenv(name)
+    if not raw_value:
+        return None
+    try:
+        return int(raw_value)
+    except ValueError:
+        logger.warning("%s must be an integer; the integration is disabled.", name)
+        return None
+
+
+COINGECKO_API_KEY = os.getenv("COINGECKO_API_KEY")
+TELEGRAM_API_ID = _read_optional_int_env("TELEGRAM_API_ID")
+TELEGRAM_API_HASH = os.getenv("TELEGRAM_API_HASH")
+TELEGRAM_SESSION_STRING = os.getenv("TELEGRAM_SESSION_STRING")
+
+telegram_client_state: TelegramClient | TelegramAvailability = (
     TelegramAvailability.UNAVAILABLE
-    if all([TELEGRAM_API_ID, TELEGRAM_API_HASH, TELEGRAM_SESSION_STRING])
+    if all((TELEGRAM_API_ID, TELEGRAM_API_HASH, TELEGRAM_SESSION_STRING))
     else TelegramAvailability.NOT_CONFIGURED
 )
+upstream_http_client: httpx.AsyncClient | None = None
 
 
-def _bounded_text(value, max_chars: int, default: str = 'N/A') -> str:
-    if not isinstance(value, (str, int, float)) or isinstance(value, bool):
-        return default
-    text = str(value).replace('\n', ' ').strip()
-    if not text:
-        return default
-    if len(text) <= max_chars:
-        return text
-    return text[:max_chars - 3].rstrip() + "..."
-
-
-def _format_coin_details(details: dict) -> str:
-    market_data = details.get('market_data') or {}
-    current_price = market_data.get('current_price') if isinstance(market_data, dict) else {}
-    price_krw = current_price.get('krw', 'N/A') if isinstance(current_price, dict) else 'N/A'
-    if not isinstance(price_krw, (int, float)) or isinstance(price_krw, bool):
-        price_krw = 'N/A'
-    symbol = _bounded_text(details.get('symbol'), COIN_SYMBOL_MAX_CHARS)
-    market_cap_rank = details.get('market_cap_rank')
-    if not isinstance(market_cap_rank, int) or isinstance(market_cap_rank, bool) or market_cap_rank < 1:
-        market_cap_rank = 'N/A'
-    links = details.get('links') or {}
-    homepage = links.get('homepage') if isinstance(links, dict) else None
-    homepage_url = 'N/A'
-    if isinstance(homepage, list):
-        for candidate in homepage:
-            bounded_candidate = _bounded_text(candidate, HOMEPAGE_MAX_CHARS, default='')
-            if bounded_candidate:
-                homepage_url = bounded_candidate
-                break
-
-    report = [
-        f"'{_bounded_text(details.get('name'), COIN_NAME_MAX_CHARS)}' ({symbol.upper()}) 상세 정보:",
-        f"- 시가총액 순위: {market_cap_rank}위",
-        f"- 현재 가격: ₩{price_krw:,}" if isinstance(price_krw, (int, float)) else f"- 현재 가격: {price_krw}",
-        f"- 홈페이지: {homepage_url}"
-    ]
-    return "\n".join(report)
-
-
-def _format_percentage(value) -> str:
-    if isinstance(value, (int, float)) and not isinstance(value, bool):
-        return f"{value:.1f}%"
-    return "N/A"
-
-
-async def _disconnect_telegram_client(client):
-    if not client:
+async def _disconnect_telegram_client(telegram_client: TelegramClient | None) -> bool:
+    if telegram_client is None or not telegram_client.is_connected():
         return False
 
     try:
-        if client.is_connected():
-            async with asyncio.timeout(TELEGRAM_CLEANUP_TIMEOUT_SECONDS):
-                await client.disconnect()
-            return True
+        async with asyncio.timeout(TELEGRAM_CLEANUP_TIMEOUT_SECONDS):
+            await cast(Awaitable[object], telegram_client.disconnect())
     except TimeoutError:
-        print("텔레그램 연결 해제 시간이 초과되었지만 무시합니다.")
-    except Exception as e:
-        print(f"텔레그램 연결 해제 중 오류가 발생했지만 무시합니다: {e}")
-    return False
+        logger.warning("Telegram client cleanup timed out.")
+        return False
+    except Exception:
+        logger.exception("Telegram client cleanup failed.")
+        return False
+    return True
+
+
+async def _connect_telegram_client() -> TelegramClient | TelegramAvailability:
+    telegram_api_id = TELEGRAM_API_ID
+    telegram_api_hash = TELEGRAM_API_HASH
+    telegram_session_string = TELEGRAM_SESSION_STRING
+    if not telegram_api_id or not telegram_api_hash or not telegram_session_string:
+        logger.info("Telegram is not configured; Telegram-backed features are disabled.")
+        return TelegramAvailability.NOT_CONFIGURED
+
+    telegram_client: TelegramClient | None = None
+    try:
+        logger.info("Connecting to Telegram.")
+        telegram_client = TelegramClient(
+            StringSession(telegram_session_string),
+            telegram_api_id,
+            telegram_api_hash,
+        )
+        async with asyncio.timeout(TELEGRAM_OPERATION_TIMEOUT_SECONDS):
+            await telegram_client.connect()
+            is_authorized = await telegram_client.is_user_authorized()
+
+        if is_authorized:
+            logger.info("Telegram client connected.")
+            return telegram_client
+
+        logger.warning("Telegram authorization failed; regenerate TELEGRAM_SESSION_STRING.")
+        await _disconnect_telegram_client(telegram_client)
+        return TelegramAvailability.UNAUTHORIZED
+    except TimeoutError:
+        logger.warning("Telegram initialization timed out.")
+        await _disconnect_telegram_client(telegram_client)
+    except Exception:
+        logger.exception("Telegram initialization failed.")
+        await _disconnect_telegram_client(telegram_client)
+    return TelegramAvailability.UNAVAILABLE
 
 
 @asynccontextmanager
-async def lifespan(app: FastMCP):
-    """
-    서버 시작 시 초기화된 전역 텔레그램 클라이언트 인스턴스를 반환합니다.
-    """
-    global telegram_runtime
-    if not all([TELEGRAM_API_ID, TELEGRAM_API_HASH, TELEGRAM_SESSION_STRING]):
-        telegram_runtime = TelegramAvailability.NOT_CONFIGURED
-        print("텔레그램 환경 변수가 설정되지않아 관련 기능이 비활성화됩니다.")
-    else:
-        telegram_runtime = TelegramAvailability.UNAVAILABLE
-        client = None
+async def _http_client_context():
+    """Reuse the server HTTP client, with a transient client for direct calls."""
+    if upstream_http_client is not None:
+        yield upstream_http_client
+        return
+
+    async with httpx.AsyncClient() as transient_http_client:
+        yield transient_http_client
+
+
+@asynccontextmanager
+async def lifespan(_app: FastMCP):
+    """Own shared HTTP and optional Telegram clients for the server lifetime."""
+    global telegram_client_state, upstream_http_client
+
+    async with httpx.AsyncClient() as shared_http_client:
+        upstream_http_client = shared_http_client
+        telegram_client_state = await _connect_telegram_client()
         try:
-            print("Connecting to Telegram...")
-            client = TelegramClient(StringSession(TELEGRAM_SESSION_STRING), TELEGRAM_API_ID, TELEGRAM_API_HASH)
-            async with asyncio.timeout(TELEGRAM_OPERATION_TIMEOUT_SECONDS):
-                await client.connect()
-                is_authorized = await client.is_user_authorized()
-            if not is_authorized:
-                print("텔레그램 인증이 필요합니다. 로컬에서 스크립트를 실행하여 세션 파일을 생성해주세요.")
-                await _disconnect_telegram_client(client)
-                telegram_runtime = TelegramAvailability.UNAUTHORIZED
-            else:
-                telegram_runtime = client
-                print("텔레그램 클라이언트 연결 완료.")
-        except TimeoutError:
-            print("텔레그램 초기화 시간이 초과되어 관련 기능이 비활성화됩니다.")
-            telegram_runtime = TelegramAvailability.UNAVAILABLE
-            await _disconnect_telegram_client(client)
-        except Exception as e:
-            print(f"텔레그램 초기화 실패로 관련 기능이 비활성화됩니다: {e}")
-            telegram_runtime = TelegramAvailability.UNAVAILABLE
-            await _disconnect_telegram_client(client)
-    try:
-        yield
-    finally:
-        runtime = telegram_runtime
-        if not isinstance(runtime, TelegramAvailability):
-            telegram_runtime = TelegramAvailability.UNAVAILABLE
-            print("Disconnecting from Telegram...")
-            if await _disconnect_telegram_client(runtime):
-                print("텔레그램 클라이언트 연결 해제 완료.")
+            yield
+        finally:
+            active_telegram_client = telegram_client_state
+            if not isinstance(active_telegram_client, TelegramAvailability):
+                telegram_client_state = TelegramAvailability.UNAVAILABLE
+                if await _disconnect_telegram_client(active_telegram_client):
+                    logger.info("Telegram client disconnected.")
+            upstream_http_client = None
 
-# FastMCP 앱 인스턴스 생성
-mcp = FastMCP("Intelligent Crypto Assistant", lifespan=lifespan)
 
-# --- 내부 헬퍼 함수 ---
+mcp = FastMCP("crypto-info-mcp", lifespan=lifespan)
+
 
 def _get_telegram_client() -> TelegramClient:
-    """
-    서버 시작 시 초기화된 전역 텔레그램 클라이언트 인스턴스를 반환합니다.
-    """
-    if isinstance(telegram_runtime, TelegramAvailability):
+    if isinstance(telegram_client_state, TelegramAvailability):
         raise CryptoToolError(
             ToolErrorCode.TELEGRAM_UNAVAILABLE,
             TELEGRAM_UNAVAILABLE_MESSAGE,
         )
-    return telegram_runtime
+    return telegram_client_state
+
+
+def _parse_fear_and_greed_payload(payload: object) -> dict[str, object] | None:
+    if not isinstance(payload, dict):
+        return None
+
+    records = payload.get("data")
+    if not isinstance(records, list) or not records or not isinstance(records[0], dict):
+        return None
+
+    latest = records[0]
+    raw_value = latest.get("value")
+    classification = latest.get("value_classification")
+    if isinstance(raw_value, bool) or not isinstance(raw_value, (str, int, float)):
+        return None
+
+    try:
+        index_value = float(raw_value)
+    except (TypeError, ValueError):
+        return None
+
+    if not 0 <= index_value <= 100:
+        return None
+    if not isinstance(classification, str) or not classification.strip():
+        return None
+    return latest
+
 
 async def _fetch_fear_and_greed_index() -> MarketSourceResult:
-    """alternative.me에서 최신 공포 및 탐욕 지수를 비동기적으로 가져옵니다."""
+    """Fetch the current Alternative.me Fear & Greed record."""
     try:
-        async with httpx.AsyncClient() as client:
-            response = await client.get("https://api.alternative.me/fng/?limit=1", timeout=10)
-            response.raise_for_status()
-            payload = response.json()
-            data = payload.get('data') if isinstance(payload, dict) else None
-            if isinstance(data, list) and data and isinstance(data[0], dict):
-                latest = data[0]
-                raw_value = latest.get('value')
-                classification = latest.get('value_classification')
-                try:
-                    index_value = float(raw_value) if not isinstance(raw_value, bool) else None
-                except (TypeError, ValueError):
-                    index_value = None
-                if (
-                    index_value is not None
-                    and 0 <= index_value <= 100
-                    and isinstance(classification, str)
-                    and classification.strip()
-                ):
-                    return MarketSourceResult(MarketSourceStatus.OK, latest)
-            return MarketSourceResult(MarketSourceStatus.UNAVAILABLE)
-    except Exception as e:
-        print(f"Fear & Greed Index Fetch Error: {e}")
+        async with _http_client_context() as http_client:
+            sentiment_response = await http_client.get(
+                ALTERNATIVE_ME_FEAR_AND_GREED_URL,
+                timeout=HTTP_REQUEST_TIMEOUT_SECONDS,
+            )
+            sentiment_response.raise_for_status()
+            latest = _parse_fear_and_greed_payload(sentiment_response.json())
+    except Exception as exc:
+        logger.warning("Alternative.me market sentiment request failed: %s", exc)
         return MarketSourceResult(MarketSourceStatus.UNAVAILABLE)
+
+    if latest is None:
+        logger.warning("Alternative.me returned an unexpected response shape.")
+        return MarketSourceResult(MarketSourceStatus.UNAVAILABLE)
+    return MarketSourceResult(MarketSourceStatus.OK, latest)
+
+
+def _parse_global_market_payload(payload: object) -> dict[str, object] | None:
+    if not isinstance(payload, dict):
+        return None
+
+    market_data = payload.get("data")
+    if not isinstance(market_data, dict):
+        return None
+
+    percentages = market_data.get("market_cap_percentage")
+    if not isinstance(percentages, dict) or not {"btc", "eth"} <= percentages.keys():
+        return None
+    return market_data
+
 
 async def _fetch_global_market_data() -> MarketSourceResult:
-    """CoinGecko API에서 글로벌 마켓 데이터(예: 도미넌스)를 비동기적으로 가져옵니다."""
-    if not COINGECKO_API_KEY:
+    """Fetch CoinGecko global market dominance data."""
+    coingecko_api_key = COINGECKO_API_KEY
+    if not coingecko_api_key:
         return MarketSourceResult(MarketSourceStatus.NOT_CONFIGURED)
+
     try:
-        url = "https://api.coingecko.com/api/v3/global"
-        headers = {'x-cg-demo-api-key': COINGECKO_API_KEY}
-        async with httpx.AsyncClient() as client:
-            response = await client.get(url, headers=headers, timeout=10)
-            response.raise_for_status()
-            payload = response.json()
-            data = payload.get('data') if isinstance(payload, dict) else None
-            percentages = (
-                data.get('market_cap_percentage')
-                if isinstance(data, dict)
-                else None
+        async with _http_client_context() as http_client:
+            market_response = await http_client.get(
+                COINGECKO_GLOBAL_MARKET_URL,
+                headers={"x-cg-demo-api-key": coingecko_api_key},
+                timeout=HTTP_REQUEST_TIMEOUT_SECONDS,
             )
-            if isinstance(percentages, dict) and {'btc', 'eth'} <= percentages.keys():
-                return MarketSourceResult(MarketSourceStatus.OK, data)
-            return MarketSourceResult(MarketSourceStatus.UNAVAILABLE)
-    except Exception as e:
-        print(f"Global Market Data Fetch Error: {e}")
+            market_response.raise_for_status()
+            market_data = _parse_global_market_payload(market_response.json())
+    except Exception as exc:
+        logger.warning("CoinGecko global market request failed: %s", exc)
         return MarketSourceResult(MarketSourceStatus.UNAVAILABLE)
 
-
-def _is_before_since(message, since: datetime) -> bool:
-    """Return whether a Telegram message is older than the requested UTC window."""
-    message_date = getattr(message, "date", None)
-    if message_date is None:
-        return False
-    return _as_utc(message_date) < since
+    if market_data is None:
+        logger.warning("CoinGecko global endpoint returned an unexpected response shape.")
+        return MarketSourceResult(MarketSourceStatus.UNAVAILABLE)
+    return MarketSourceResult(MarketSourceStatus.OK, market_data)
 
 
 def _as_utc(value: datetime) -> datetime:
-    """Normalize Telegram datetimes without depending on the server timezone."""
     if value.tzinfo is None:
-        return value.replace(tzinfo=timezone.utc)
-    return value.astimezone(timezone.utc)
+        return value.replace(tzinfo=UTC)
+    return value.astimezone(UTC)
+
+
+def _is_before_since(message: object, since: datetime) -> bool:
+    message_date = getattr(message, "date", None)
+    return isinstance(message_date, datetime) and _as_utc(message_date) < since
 
 
 async def _fetch_whale_alerts() -> WhaleAlertResult:
-    """텔레그램 'whale_alert_io' 채널에서 지난 1시간 동안의 메시지를 가져옵니다."""
-    runtime = telegram_runtime
-    if runtime is TelegramAvailability.NOT_CONFIGURED:
-        return WhaleAlertResult(TelegramFetchStatus.NOT_CONFIGURED)
-    if runtime is TelegramAvailability.UNAUTHORIZED:
-        return WhaleAlertResult(TelegramFetchStatus.UNAUTHORIZED)
-    if isinstance(runtime, TelegramAvailability):
-        return WhaleAlertResult(TelegramFetchStatus.UNAVAILABLE)
+    """Fetch whale-alert messages from the previous hour."""
+    current_telegram_state = telegram_client_state
+    unavailable_status = {
+        TelegramAvailability.NOT_CONFIGURED: TelegramFetchStatus.NOT_CONFIGURED,
+        TelegramAvailability.UNAUTHORIZED: TelegramFetchStatus.UNAUTHORIZED,
+        TelegramAvailability.UNAVAILABLE: TelegramFetchStatus.UNAVAILABLE,
+    }
+    if isinstance(current_telegram_state, TelegramAvailability):
+        return WhaleAlertResult(unavailable_status[current_telegram_state])
 
-    messages_text: list[str] = []
-    since = datetime.now(timezone.utc) - timedelta(hours=1)
+    since = datetime.now(UTC) - timedelta(hours=1)
+    messages: list[str] = []
     try:
-        # Telethon's default iteration is newest first, so the first older post ends the window.
         async with asyncio.timeout(TELEGRAM_OPERATION_TIMEOUT_SECONDS):
-            async for message in runtime.iter_messages(WHALE_ALERT_CHANNEL, limit=5):
+            async for message in current_telegram_state.iter_messages(
+                WHALE_ALERT_CHANNEL,
+                limit=TELEGRAM_WHALE_MESSAGE_LIMIT,
+            ):
                 if _is_before_since(message, since):
                     break
-                if message.text:
-                    messages_text.append(message.text)
+                text = getattr(message, "text", None)
+                if isinstance(text, str) and text:
+                    messages.append(text)
     except TimeoutError:
-        print("Whale Alert fetch timed out.")
+        logger.warning("Whale-alert channel request timed out.")
         return WhaleAlertResult(TelegramFetchStatus.FETCH_FAILED)
-    except Exception as e:
-        print(f"Whale Alert Fetch Error: {e}")
+    except Exception as exc:
+        logger.warning("Whale-alert channel request failed: %s", exc)
         return WhaleAlertResult(TelegramFetchStatus.FETCH_FAILED)
-    if not messages_text:
+
+    if not messages:
         return WhaleAlertResult(TelegramFetchStatus.NO_MESSAGES)
-    return WhaleAlertResult(TelegramFetchStatus.OK, tuple(messages_text))
+    return WhaleAlertResult(TelegramFetchStatus.OK, tuple(messages))
+
+
+def _news_message_from_telegram(
+    channel: str,
+    message: object,
+    fallback_date: datetime,
+) -> NewsMessage | None:
+    message_id = getattr(message, "id", None)
+    if not isinstance(message_id, int) or isinstance(message_id, bool) or message_id < 1:
+        return None
+
+    text = getattr(message, "text", None)
+    if not isinstance(text, str) or not text:
+        return None
+
+    raw_date = getattr(message, "date", None)
+    message_date = _as_utc(raw_date) if isinstance(raw_date, datetime) else fallback_date
+    normalized_text = text.replace("\n", " ").strip()
+    truncated = len(normalized_text) > NEWS_PREVIEW_MAX_CHARS
+    preview = (
+        f"{normalized_text[: NEWS_PREVIEW_MAX_CHARS - 3]}..." if truncated else normalized_text
+    )
+    return NewsMessage(
+        date=message_date,
+        preview=NewsPreview(
+            channel=channel,
+            message_id=message_id,
+            timestamp=message_date.strftime("%m-%d %H:%M UTC"),
+            preview=preview,
+            truncated=truncated,
+        ),
+    )
 
 
 async def _fetch_news_channel(
@@ -424,259 +383,275 @@ async def _fetch_news_channel(
     messages: list[NewsMessage] = []
     failure: NewsChannelFailureCode | None = None
     try:
-        # Request newest posts first and stop at the first one outside the time window.
         async with asyncio.timeout(TELEGRAM_OPERATION_TIMEOUT_SECONDS):
-            async for msg in client.iter_messages(channel, limit=10):
-                if _is_before_since(msg, since):
+            async for message in client.iter_messages(
+                channel,
+                limit=TELEGRAM_NEWS_MESSAGE_LIMIT,
+            ):
+                if _is_before_since(message, since):
                     break
-                if msg.text:
-                    message_id = getattr(msg, "id", None)
-                    if (
-                        not isinstance(message_id, int)
-                        or isinstance(message_id, bool)
-                        or message_id < 1
-                    ):
-                        failure = NewsChannelFailureCode.INVALID_MESSAGE_REFERENCE
-                        continue
-                    message_date = _as_utc(msg.date) if getattr(msg, "date", None) else since
-                    preview = msg.text.replace('\n', ' ').strip()
-                    if len(preview) > 150:
-                        preview = preview[:147] + "..."
-                        truncated = True
-                    else:
-                        truncated = False
-                    messages.append(NewsMessage(
-                        date=message_date,
-                        item=NewsPreview(
-                            channel=channel,
-                            message_id=message_id,
-                            timestamp=message_date.strftime('%m-%d %H:%M UTC'),
-                            preview=preview,
-                            truncated=truncated,
-                        ),
-                    ))
+                if not getattr(message, "text", None):
+                    continue
+
+                news_message = _news_message_from_telegram(channel, message, since)
+                if news_message is None:
+                    failure = NewsChannelFailureCode.INVALID_MESSAGE_REFERENCE
+                    continue
+                messages.append(news_message)
     except TimeoutError:
-        print(f"Telegram news fetch timed out for {channel}.")
+        logger.warning("Telegram news request timed out for %s.", channel)
         failure = NewsChannelFailureCode.TIMEOUT
-    except Exception as e:
-        print(f"Telegram news fetch error for {channel}: {e}")
+    except Exception as exc:
+        logger.warning("Telegram news request failed for %s: %s", channel, exc)
         failure = NewsChannelFailureCode.UPSTREAM_ERROR
     return NewsChannelResult(channel, tuple(messages), failure)
 
 
-# --- MCP 도구 함수 정의 ---
+def _market_result_or_unavailable(value: object) -> MarketSourceResult:
+    if isinstance(value, MarketSourceResult):
+        return value
+    return MarketSourceResult(MarketSourceStatus.UNAVAILABLE)
+
+
+def _whale_result_or_failed(value: object) -> WhaleAlertResult:
+    if isinstance(value, WhaleAlertResult):
+        return value
+    return WhaleAlertResult(TelegramFetchStatus.FETCH_FAILED)
+
+
+def _sentiment_report_line(result: MarketSourceResult) -> str:
+    if result.status is not MarketSourceStatus.OK or not isinstance(result.payload, dict):
+        return "- 시장 심리: Alternative.me 조회 실패로 확인 불가"
+
+    classification = _bounded_text(
+        result.payload.get("value_classification"),
+        MARKET_LABEL_MAX_CHARS,
+    )
+    index_value = _bounded_text(result.payload.get("value"), MARKET_LABEL_MAX_CHARS)
+    return f"- 시장 심리: '{classification}' (지수: {index_value})"
+
+
+def _dominance_report_line(result: MarketSourceResult) -> str | None:
+    if result.status is MarketSourceStatus.NOT_CONFIGURED:
+        return None
+    if result.status is not MarketSourceStatus.OK or not isinstance(result.payload, dict):
+        return "- 시장 지배력: CoinGecko 조회 실패로 확인 불가"
+
+    percentages = result.payload.get("market_cap_percentage")
+    if not isinstance(percentages, dict):
+        return "- 시장 지배력: CoinGecko 조회 실패로 확인 불가"
+
+    btc_dominance = _format_percentage(percentages.get("btc"))
+    eth_dominance = _format_percentage(percentages.get("eth"))
+    return f"- 시장 지배력: BTC {btc_dominance}, ETH {eth_dominance}"
+
+
+def _whale_alert_report_lines(result: WhaleAlertResult) -> list[str]:
+    if result.status is TelegramFetchStatus.OK and result.messages:
+        return [
+            "- 주요 자금 이동 (지난 1시간):",
+            *(
+                f"  - {_bounded_text(message, WHALE_ALERT_MAX_CHARS, default='')}"
+                for message in result.messages
+            ),
+        ]
+
+    fallback = WHALE_ALERT_STATUS_MESSAGES.get(result.status)
+    return [fallback or "- 주요 자금 이동: 포착된 움직임 없음"]
+
 
 @mcp.tool()
 async def get_market_overview() -> str:
-    """
-    현재 암호화폐 시장의 전반적인 상황을 브리핑합니다. 시장 심리, 자금 흐름, 주요 자금 이동(고래) 정보를 종합합니다.
-    """
-    fng_result, global_result, whale_result = await asyncio.gather(
+    """시장 심리, BTC/ETH 지배력, 최근 고래 알림을 요약합니다."""
+    raw_sentiment, raw_global_market, raw_whale_alerts = await asyncio.gather(
         _fetch_fear_and_greed_index(),
         _fetch_global_market_data(),
         _fetch_whale_alerts(),
-        return_exceptions=True
+        return_exceptions=True,
     )
-    if not isinstance(fng_result, MarketSourceResult):
-        fng_result = MarketSourceResult(MarketSourceStatus.UNAVAILABLE)
-    if not isinstance(global_result, MarketSourceResult):
-        global_result = MarketSourceResult(MarketSourceStatus.UNAVAILABLE)
-    if not isinstance(whale_result, WhaleAlertResult):
-        whale_result = WhaleAlertResult(TelegramFetchStatus.FETCH_FAILED)
+    sentiment = _market_result_or_unavailable(raw_sentiment)
+    global_market = _market_result_or_unavailable(raw_global_market)
+    whale_alerts = _whale_result_or_failed(raw_whale_alerts)
 
-    report = ["현재 시장 개요 브리핑:"]
-    if (
-        fng_result.status is MarketSourceStatus.OK
-        and isinstance(fng_result.data, dict)
-        and fng_result.data
-    ):
-        classification = _bounded_text(
-            fng_result.data.get('value_classification'),
-            MARKET_LABEL_MAX_CHARS,
-        )
-        value = _bounded_text(fng_result.data.get('value'), MARKET_LABEL_MAX_CHARS)
-        report.append(f"- 시장 심리: '{classification}' (지수: {value})")
-    else:
-        report.append("- 시장 심리: Alternative.me 조회 실패로 확인 불가")
-
-    if (
-        global_result.status is MarketSourceStatus.OK
-        and isinstance(global_result.data, dict)
-        and isinstance(global_result.data.get('market_cap_percentage'), dict)
-    ):
-        percentages = global_result.data['market_cap_percentage']
-        btc_dom = _format_percentage(percentages.get('btc'))
-        eth_dom = _format_percentage(percentages.get('eth'))
-        report.append(f"- 시장 지배력: BTC {btc_dom}, ETH {eth_dom}")
-    elif global_result.status is not MarketSourceStatus.NOT_CONFIGURED:
-        report.append("- 시장 지배력: CoinGecko 조회 실패로 확인 불가")
-
-    if whale_result.status is TelegramFetchStatus.FETCH_FAILED:
-        report.append("- 주요 자금 이동: Telegram 조회 실패로 확인 불가")
-    elif whale_result.status is TelegramFetchStatus.UNAUTHORIZED:
-        report.append("- 주요 자금 이동: Telegram 인증에 실패하여 확인 불가")
-    elif whale_result.status is TelegramFetchStatus.UNAVAILABLE:
-        report.append("- 주요 자금 이동: Telegram을 사용할 수 없어 확인 불가")
-    elif whale_result.status is TelegramFetchStatus.NOT_CONFIGURED:
-        report.append("- 주요 자금 이동: Telegram이 설정되지 않아 확인 불가")
-    elif whale_result.status is TelegramFetchStatus.NO_MESSAGES:
-        report.append("- 주요 자금 이동: 최근 1시간 내 포착된 움직임 없음")
-    elif whale_result.status is TelegramFetchStatus.OK and whale_result.messages:
-        report.append("- 주요 자금 이동 (지난 1시간):")
-        for alert in whale_result.messages:
-            report.append(
-                f"  - {_bounded_text(alert, WHALE_ALERT_MAX_CHARS, default='')}"
-            )
-    else:
-        report.append("- 주요 자금 이동: 포착된 움직임 없음")
-
+    report = ["현재 시장 개요 브리핑:", _sentiment_report_line(sentiment)]
+    dominance_line = _dominance_report_line(global_market)
+    if dominance_line is not None:
+        report.append(dominance_line)
+    report.extend(_whale_alert_report_lines(whale_alerts))
     return "\n".join(report)
 
-@mcp.tool()
-async def get_coin_details(coin_id: CoinGeckoId | None = None) -> str:
-    """
-    특정 암호화폐의 상세 정보를 제공합니다. CoinGecko ID(예: 'bitcoin')를 입력해야 합니다.
-    """
+
+def _normalize_coin_id(coin_id: str | None) -> str:
     if coin_id is None or not coin_id.strip():
         raise CryptoToolError(
             ToolErrorCode.COIN_ID_REQUIRED,
             "CoinGecko 코인 ID를 입력해주세요.",
         )
-    coin_id = coin_id.strip()
-    if len(coin_id) > COIN_ID_MAX_CHARS or not COIN_ID_PATTERN.fullmatch(coin_id):
+
+    normalized = coin_id.strip()
+    if len(normalized) > COIN_ID_MAX_CHARS or not COIN_ID_PATTERN.fullmatch(normalized):
         raise CryptoToolError(
             ToolErrorCode.COIN_ID_INVALID,
             "CoinGecko 코인 ID는 영문, 숫자, 밑줄, 하이픈으로 구성된 200자 이하의 값이어야 합니다.",
         )
-    if not COINGECKO_API_KEY:
-        raise CryptoToolError(
-            ToolErrorCode.COINGECKO_API_KEY_MISSING,
-            "서버에 CoinGecko API 키(COINGECKO_API_KEY)가 설정되지 않았습니다.",
-        )
-    try:
-        url = f"https://api.coingecko.com/api/v3/coins/{coin_id}?localization=false&tickers=false&community_data=false&developer_data=false"
-        headers = {'x-cg-demo-api-key': COINGECKO_API_KEY}
-        async with httpx.AsyncClient() as client:
-            response = await client.get(url, headers=headers, timeout=10)
-            response.raise_for_status()
-            details = response.json()
+    return normalized
 
-    except httpx.HTTPStatusError as e:
-        if e.response.status_code == 404:
+
+async def _request_coin_details(coin_id: str, coingecko_api_key: str) -> dict[str, object]:
+    url = COINGECKO_COIN_DETAILS_URL.format(coin_id=coin_id)
+    params = {
+        "localization": "false",
+        "tickers": "false",
+        "community_data": "false",
+        "developer_data": "false",
+    }
+    try:
+        async with _http_client_context() as http_client:
+            coin_response = await http_client.get(
+                url,
+                params=params,
+                headers={"x-cg-demo-api-key": coingecko_api_key},
+                timeout=HTTP_REQUEST_TIMEOUT_SECONDS,
+            )
+            coin_response.raise_for_status()
+            payload = coin_response.json()
+    except httpx.HTTPStatusError as exc:
+        if exc.response.status_code == COINGECKO_NOT_FOUND_STATUS:
             raise CryptoToolError(
                 ToolErrorCode.COIN_NOT_FOUND,
                 f"'{coin_id}' 코인을 찾을 수 없습니다. ID를 확인해주세요.",
-            )
-        print(f"CoinGecko coin detail HTTP error for {coin_id}: {e}")
+            ) from None
+        logger.warning("CoinGecko coin request failed for %s: %s", coin_id, exc)
         raise CryptoToolError(
             ToolErrorCode.COINGECKO_UPSTREAM_ERROR,
             f"'{coin_id}' 정보 조회 중 CoinGecko API 오류가 발생했습니다.",
-        )
-    except Exception as e:
-        print(f"CoinGecko coin detail fetch error for {coin_id}: {e}")
+        ) from exc
+    except Exception as exc:
+        logger.warning("CoinGecko coin response failed for %s: %s", coin_id, exc)
         raise CryptoToolError(
             ToolErrorCode.COINGECKO_UPSTREAM_ERROR,
             f"'{coin_id}' 정보를 가져오는 데 실패했습니다.",
-        )
+        ) from exc
 
-    name = details.get("name") if isinstance(details, dict) else None
-    if not isinstance(name, str) or not name.strip():
-        print(f"CoinGecko coin detail payload invalid for {coin_id}.")
+    if not isinstance(payload, dict):
         raise CryptoToolError(
             ToolErrorCode.COINGECKO_UPSTREAM_ERROR,
             f"'{coin_id}' 정보 응답을 확인할 수 없습니다.",
         )
+    return payload
+
+
+@mcp.tool()
+async def get_coin_details(coin_id: CoinGeckoId | None = None) -> str:
+    """CoinGecko ID로 코인의 순위, 원화 가격, 홈페이지를 조회합니다."""
+    normalized_coin_id = _normalize_coin_id(coin_id)
+    coingecko_api_key = COINGECKO_API_KEY
+    if not coingecko_api_key:
+        raise CryptoToolError(
+            ToolErrorCode.COINGECKO_API_KEY_MISSING,
+            "서버에 CoinGecko API 키(COINGECKO_API_KEY)가 설정되지 않았습니다.",
+        )
+
+    details = await _request_coin_details(normalized_coin_id, coingecko_api_key)
+    name = details.get("name")
+    if not isinstance(name, str) or not name.strip():
+        logger.warning(
+            "CoinGecko returned an unidentifiable payload for %s.",
+            normalized_coin_id,
+        )
+        raise CryptoToolError(
+            ToolErrorCode.COINGECKO_UPSTREAM_ERROR,
+            f"'{normalized_coin_id}' 정보 응답을 확인할 수 없습니다.",
+        )
     return _format_coin_details(details)
 
 
-# FastMCP validates required arguments before tool code. Keep the public schema
-# required while the runtime default lets omitted calls return the domain error.
+# FastMCP validates required arguments before tool code. The runtime default still
+# allows direct calls without an argument to return the domain-specific error.
 get_coin_details.parameters["properties"]["coin_id"] = {
     "type": "string",
     **COIN_ID_JSON_SCHEMA,
 }
 get_coin_details.parameters["required"] = ["coin_id"]
 
-@mcp.tool(output_schema=RealtimeNewsOutput.model_json_schema())
-async def get_realtime_news(hours: NewsHours = 1) -> ToolResult:
-    """
-    주요 텔레그램 채널에서 최신 암호화폐 뉴스를 목록 형태로 가져옵니다.
-    각 항목은 channel, message_id, timestamp, preview, truncated 정보를 포함합니다.
-    원문 전체는 get_telegram_message 도구로 조회할 수 있습니다.
-    최대 72시간(3일) 전까지의 뉴스만 조회가 가능합니다.
 
-    Args:
-        hours (int, optional): 현재로부터 몇 시간 전까지의 뉴스를 가져올지 지정합니다. 기본값은 1, 최대값은 72입니다.
-    """
+def _validate_news_hours(hours: int) -> None:
     if (
         not isinstance(hours, int)
         or isinstance(hours, bool)
-        or not (1 <= hours <= 72)
+        or not NEWS_LOOKBACK_MIN_HOURS <= hours <= NEWS_LOOKBACK_MAX_HOURS
     ):
         raise CryptoToolError(
             ToolErrorCode.NEWS_HOURS_INVALID,
-            "'hours' 파라미터는 1과 72 사이의 값이어야 합니다.",
+            f"'hours' 파라미터는 {NEWS_LOOKBACK_MIN_HOURS}과 "
+            f"{NEWS_LOOKBACK_MAX_HOURS} 사이의 값이어야 합니다.",
         )
 
-    channels = NEWS_CHANNELS
-    since = datetime.now(timezone.utc) - timedelta(hours=hours)
 
-    client = _get_telegram_client()
+def _merge_news_results(
+    results: list[NewsChannelResult],
+) -> tuple[list[NewsMessage], dict[str, NewsChannelFailureCode]]:
+    messages = [message for result in results for message in result.messages]
+    messages.sort(key=lambda message: message.date, reverse=True)
+    failed_channels = {
+        result.channel: result.failure for result in results if result.failure is not None
+    }
+    return messages, failed_channels
 
-    tasks = [_fetch_news_channel(client, ch, since) for ch in channels]
-    results = await asyncio.gather(*tasks)
 
-    all_messages: list[NewsMessage] = []
-    failed_channels: dict[str, NewsChannelFailureCode] = {}
+def _raise_for_total_news_failure(
+    messages: list[NewsMessage],
+    failed_channels: dict[str, NewsChannelFailureCode],
+) -> None:
+    if messages or set(failed_channels) != set(NEWS_CHANNELS):
+        return
 
-    for result in results:
-        all_messages.extend(result.messages)
-        if result.failure is not None:
-            failed_channels[result.channel] = result.failure
-
-    all_messages.sort(key=lambda message: message.date, reverse=True)
-
-    if not all_messages and set(failed_channels) == set(channels):
-        if all(
-            failure is NewsChannelFailureCode.TIMEOUT
-            for failure in failed_channels.values()
-        ):
-            raise CryptoToolError(
-                ToolErrorCode.TELEGRAM_TIMEOUT,
-                "모든 Telegram 뉴스 채널 조회 시간이 초과되었습니다.",
-            )
+    if all(failure is NewsChannelFailureCode.TIMEOUT for failure in failed_channels.values()):
         raise CryptoToolError(
-            ToolErrorCode.TELEGRAM_UPSTREAM_ERROR,
-            "모든 Telegram 뉴스 채널을 조회하는 데 실패했습니다.",
+            ToolErrorCode.TELEGRAM_TIMEOUT,
+            "모든 Telegram 뉴스 채널 조회 시간이 초과되었습니다.",
         )
+    raise CryptoToolError(
+        ToolErrorCode.TELEGRAM_UPSTREAM_ERROR,
+        "모든 Telegram 뉴스 채널을 조회하는 데 실패했습니다.",
+    )
 
-    if all_messages:
+
+def _news_report_lines(
+    hours: int,
+    messages: list[NewsMessage],
+    failed_channels: dict[str, NewsChannelFailureCode],
+) -> list[str]:
+    if messages:
         report = [f"지난 {hours}시간 동안의 주요 뉴스:"]
-        for message in all_messages:
-            item = message.item
-            trunc = " (원문 참조 필요)" if item.truncated else ""
-            report.append(
-                f"- [{item.timestamp}] @{item.channel} #{item.message_id} / "
-                f"{item.preview}{trunc}"
-            )
+        report.extend(
+            f"- [{message.preview.timestamp}] @{message.preview.channel} "
+            f"#{message.preview.message_id} / {message.preview.preview}"
+            f"{' (원문 참조 필요)' if message.preview.truncated else ''}"
+            for message in messages
+        )
     elif failed_channels:
-        report = [
-            f"지난 {hours}시간 동안 조회에 성공한 채널에서는 새로운 뉴스가 없습니다."
-        ]
+        report = [f"지난 {hours}시간 동안 조회에 성공한 채널에서는 새로운 뉴스가 없습니다."]
     else:
         report = [f"지난 {hours}시간 동안 지정된 채널에서 새로운 뉴스가 없습니다."]
 
     if failed_channels:
-        report.append("")
-        report.append("조회 실패 채널:")
-        for ch, failure in failed_channels.items():
-            report.append(
-                f"  @{ch}: 조회 실패: {NEWS_CHANNEL_FAILURE_MESSAGES[failure]}"
-            )
+        report.extend(("", "조회 실패 채널:"))
+        report.extend(
+            f"  @{channel}: 조회 실패: {NEWS_CHANNEL_FAILURE_MESSAGES[failure]}"
+            for channel, failure in failed_channels.items()
+        )
+    return report
 
-    output = RealtimeNewsOutput(
+
+def _realtime_news_output(
+    hours: int,
+    messages: list[NewsMessage],
+    failed_channels: dict[str, NewsChannelFailureCode],
+) -> RealtimeNewsOutput:
+    return RealtimeNewsOutput(
         hours=hours,
-        messages=[message.item for message in all_messages],
+        messages=[message.preview for message in messages],
         failed_channels=[
             NewsChannelFailure(
                 channel=channel,
@@ -686,8 +661,29 @@ async def get_realtime_news(hours: NewsHours = 1) -> ToolResult:
             for channel, failure in failed_channels.items()
         ],
     )
+
+
+@mcp.tool(output_schema=RealtimeNewsOutput.model_json_schema())
+async def get_realtime_news(hours: NewsHours = 1) -> ToolResult:
+    """지난 1~72시간의 Telegram 뉴스 미리보기와 안정적인 참조를 반환합니다."""
+    _validate_news_hours(hours)
+    client = _get_telegram_client()
+    since = datetime.now(UTC) - timedelta(hours=hours)
+
+    results = await asyncio.gather(
+        *(_fetch_news_channel(client, channel, since) for channel in NEWS_CHANNELS)
+    )
+    messages, failed_channels = _merge_news_results(results)
+    _raise_for_total_news_failure(messages, failed_channels)
+
+    output = _realtime_news_output(hours, messages, failed_channels)
     return ToolResult(
-        content=[TextContent(type="text", text="\n".join(report))],
+        content=[
+            TextContent(
+                type="text",
+                text="\n".join(_news_report_lines(hours, messages, failed_channels)),
+            )
+        ],
         structured_content=output.model_dump(mode="json"),
     )
 
@@ -697,68 +693,75 @@ async def get_telegram_message(
     channel: TelegramChannel,
     message_id: TelegramMessageId,
 ) -> str:
-    """
-    텔레그램 채널의 특정 메시지 원문을 조회합니다.
-
-    Args:
-        channel (str): 채널 이름 (예: 'wublockchainenglish', 'watcherguru', 'whale_alert_io')
-        message_id (int): 조회할 메시지 ID
-    """
+    """허용된 Telegram 채널의 특정 텍스트 메시지 원문을 조회합니다."""
     if channel not in ALLOWED_TELEGRAM_CHANNELS:
-        allowed = ", ".join(sorted(ALLOWED_TELEGRAM_CHANNELS))
+        allowed_channels = ", ".join(sorted(ALLOWED_TELEGRAM_CHANNELS))
         raise CryptoToolError(
             ToolErrorCode.TELEGRAM_CHANNEL_NOT_ALLOWED,
-            f"허용되지 않은 채널입니다. 허용 채널: {allowed}",
+            f"허용되지 않은 채널입니다. 허용 채널: {allowed_channels}",
         )
-    if (
-        not isinstance(message_id, int)
-        or isinstance(message_id, bool)
-        or message_id < 1
-    ):
+    if not isinstance(message_id, int) or isinstance(message_id, bool) or message_id < 1:
         raise CryptoToolError(
             ToolErrorCode.TELEGRAM_MESSAGE_ID_INVALID,
             "'message_id' 파라미터는 1 이상의 정수여야 합니다.",
         )
 
     client = _get_telegram_client()
-
     try:
         async with asyncio.timeout(TELEGRAM_OPERATION_TIMEOUT_SECONDS):
-            msg = await client.get_messages(channel, ids=message_id)
-    except TimeoutError:
+            message = await client.get_messages(channel, ids=message_id)
+    except TimeoutError as exc:
         raise CryptoToolError(
             ToolErrorCode.TELEGRAM_TIMEOUT,
             "Telegram 메시지 조회 시간이 초과되었습니다.",
+        ) from exc
+    except Exception as exc:
+        logger.warning(
+            "Telegram message request failed for %s#%s: %s",
+            channel,
+            message_id,
+            exc,
         )
-    except Exception as e:
-        print(f"Telegram message fetch error for {channel}#{message_id}: {e}")
         raise CryptoToolError(
             ToolErrorCode.TELEGRAM_UPSTREAM_ERROR,
             "메시지 조회 중 Telegram 오류가 발생했습니다.",
-        )
-    if not msg:
+        ) from exc
+
+    if not message:
         raise CryptoToolError(
             ToolErrorCode.TELEGRAM_MESSAGE_NOT_FOUND,
             f"채널 '{channel}'에서 메시지 ID {message_id}를 찾을 수 없습니다.",
         )
-    if not msg.text:
+
+    text = getattr(message, "text", None)
+    if not isinstance(text, str) or not text:
         raise CryptoToolError(
             ToolErrorCode.TELEGRAM_MESSAGE_NOT_TEXT,
             f"메시지 ID {message_id}는 텍스트 콘텐츠를 포함하지 않습니다.",
         )
-    return msg.text
+    return text
+
+
+def _configure_logging() -> None:
+    requested_level = os.getenv("LOG_LEVEL", "INFO").upper()
+    level = getattr(logging, requested_level, logging.INFO)
+    logging.basicConfig(
+        level=level,
+        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+    )
 
 
 def run() -> int:
-    print("🚀 Intelligent Crypto Assistant (FastMCP) 서버를 시작합니다.", flush=True)
-    print("   - 서버 주소: http://0.0.0.0:8123", flush=True)
-    print("   - 종료하려면 Ctrl+C를 누르세요.", flush=True)
+    _configure_logging()
+    print("Crypto Info MCP 서버를 시작합니다.", flush=True)
+    print(f"- 서버 주소: http://{SERVER_HOST}:{SERVER_PORT}", flush=True)
+    print("- 종료: Ctrl+C", flush=True)
 
     try:
         mcp.run(
             transport="streamable-http",
-            host="0.0.0.0",
-            port=8123,
+            host=SERVER_HOST,
+            port=SERVER_PORT,
             uvicorn_config={"timeout_graceful_shutdown": 5},
         )
     except KeyboardInterrupt:

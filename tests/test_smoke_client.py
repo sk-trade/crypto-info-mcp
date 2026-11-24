@@ -6,7 +6,6 @@ import pytest
 from fastmcp.client.client import CallToolResult
 from mcp.types import TextContent
 
-
 ROOT = Path(__file__).resolve().parents[1]
 SPEC = importlib.util.spec_from_file_location(
     "smoke_client_module",

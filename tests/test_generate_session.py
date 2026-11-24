@@ -122,7 +122,9 @@ async def test_main_prints_session_even_if_disconnect_cleanup_fails(monkeypatch,
 
 
 @pytest.mark.asyncio
-async def test_main_propagates_authorization_failure_even_if_disconnect_cleanup_fails(monkeypatch, capsys):
+async def test_main_propagates_authorization_failure_even_if_disconnect_cleanup_fails(
+    monkeypatch, capsys
+):
     created_clients = []
 
     class FakeTelegramClient:

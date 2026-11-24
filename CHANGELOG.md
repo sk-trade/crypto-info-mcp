@@ -2,6 +2,27 @@
 
 All notable changes to this project are documented in this file.
 
+## [0.2.2] - 2026-11-24
+
+### Added
+
+- Added explicit contract and formatting modules, a short repository guide, contribution guidance, and architecture-boundary tests.
+- Added locked Ruff linting, formatting, complexity, naming, and Pyright checks to local development and CI.
+
+### Changed
+
+- Refactored market, CoinGecko, Telegram, and Gemini-client flows into smaller named helpers with consistent logging and cleanup.
+- Reused one HTTP client for the server lifetime instead of opening a client per upstream request.
+- Consolidated duplicate CI workflows and made quality checks gate image builds and production deployment.
+- Rebuilt the container as a minimal, pinned, non-root runtime and hardened the Compose service with a read-only filesystem and dropped capabilities.
+- Replaced generic image and container names with `crypto-info-mcp` identifiers.
+
+### Fixed
+
+- Corrected unavailable market-cap rank rendering from `N/A위` to `N/A`.
+- Kept Telegram disabled when any required setting is missing or empty.
+- Preserved CoinGecko query parameters as structured request options and tightened regression coverage for them.
+
 ## [0.2.1] - 2026-08-15
 
 ### Changed

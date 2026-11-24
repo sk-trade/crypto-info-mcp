@@ -1,13 +1,15 @@
 import asyncio
 import importlib.util
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import httpx
 import pytest
 from fastmcp import Client
 
-spec = importlib.util.spec_from_file_location("main_module", Path(__file__).resolve().parents[1] / "src" / "main.py")
+spec = importlib.util.spec_from_file_location(
+    "main_module", Path(__file__).resolve().parents[1] / "src" / "main.py"
+)
 main_module = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(main_module)
 
@@ -17,9 +19,7 @@ def _tool_callable(name):
 
 
 def _tool_result_text(result):
-    return "\n".join(
-        block.text for block in result.content if getattr(block, "text", None)
-    )
+    return "\n".join(block.text for block in result.content if getattr(block, "text", None))
 
 
 async def _assert_crypto_error(awaitable, code):
@@ -34,13 +34,14 @@ async def _assert_crypto_error(awaitable, code):
 def reset_runtime_state(monkeypatch):
     monkeypatch.setattr(
         main_module,
-        "telegram_runtime",
+        "telegram_client_state",
         main_module.TelegramAvailability.NOT_CONFIGURED,
     )
     monkeypatch.setattr(main_module, "COINGECKO_API_KEY", None)
     monkeypatch.setattr(main_module, "TELEGRAM_API_ID", None)
     monkeypatch.setattr(main_module, "TELEGRAM_API_HASH", None)
     monkeypatch.setattr(main_module, "TELEGRAM_SESSION_STRING", None)
+    monkeypatch.setattr(main_module, "upstream_http_client", None)
 
 
 class FakeResponse:
@@ -203,10 +204,12 @@ async def test_market_overview_combines_available_sources(monkeypatch):
     monkeypatch.setattr(
         main_module,
         "_fetch_whale_alerts",
-        lambda: _resolved(main_module.WhaleAlertResult(
-            main_module.TelegramFetchStatus.OK,
-            ("Whale moved 1,000 BTC",),
-        )),
+        lambda: _resolved(
+            main_module.WhaleAlertResult(
+                main_module.TelegramFetchStatus.OK,
+                ("Whale moved 1,000 BTC",),
+            )
+        ),
     )
 
     report = await _tool_callable("get_market_overview")()
@@ -244,7 +247,9 @@ async def test_market_overview_treats_unconfigured_telegram_as_no_whale_movement
         (main_module.TelegramFetchStatus.NO_MESSAGES, "최근 1시간 내 포착된 움직임 없음"),
     ],
 )
-async def test_market_overview_distinguishes_telegram_availability_states(monkeypatch, status, expected):
+async def test_market_overview_distinguishes_telegram_availability_states(
+    monkeypatch, status, expected
+):
     monkeypatch.setattr(
         main_module,
         "_fetch_fear_and_greed_index",
@@ -274,7 +279,9 @@ async def test_market_overview_distinguishes_telegram_availability_states(monkey
         ({"btc": 52.3, "eth": None}, "BTC 52.3%, ETH N/A"),
     ],
 )
-async def test_market_overview_tolerates_incomplete_dominance_payload(monkeypatch, percentages, expected):
+async def test_market_overview_tolerates_incomplete_dominance_payload(
+    monkeypatch, percentages, expected
+):
     monkeypatch.setattr(
         main_module,
         "_fetch_fear_and_greed_index",
@@ -288,9 +295,11 @@ async def test_market_overview_tolerates_incomplete_dominance_payload(monkeypatc
     monkeypatch.setattr(
         main_module,
         "_fetch_whale_alerts",
-        lambda: _resolved(main_module.WhaleAlertResult(
-            main_module.TelegramFetchStatus.NO_MESSAGES,
-        )),
+        lambda: _resolved(
+            main_module.WhaleAlertResult(
+                main_module.TelegramFetchStatus.NO_MESSAGES,
+            )
+        ),
     )
 
     report = await _tool_callable("get_market_overview")()
@@ -313,9 +322,11 @@ async def test_market_overview_reports_unavailable_market_sources(monkeypatch):
     monkeypatch.setattr(
         main_module,
         "_fetch_whale_alerts",
-        lambda: _resolved(main_module.WhaleAlertResult(
-            main_module.TelegramFetchStatus.NO_MESSAGES,
-        )),
+        lambda: _resolved(
+            main_module.WhaleAlertResult(
+                main_module.TelegramFetchStatus.NO_MESSAGES,
+            )
+        ),
     )
 
     report = await _tool_callable("get_market_overview")()
@@ -341,9 +352,11 @@ async def test_market_overview_omits_only_unconfigured_coingecko(monkeypatch):
     monkeypatch.setattr(
         main_module,
         "_fetch_whale_alerts",
-        lambda: _resolved(main_module.WhaleAlertResult(
-            main_module.TelegramFetchStatus.NO_MESSAGES,
-        )),
+        lambda: _resolved(
+            main_module.WhaleAlertResult(
+                main_module.TelegramFetchStatus.NO_MESSAGES,
+            )
+        ),
     )
 
     unconfigured_report = await _tool_callable("get_market_overview")()
@@ -368,22 +381,46 @@ async def test_fetch_helpers_reject_malformed_data_shapes(monkeypatch):
             FakeResponse({"data": []}),
             FakeResponse({"data": [{}]}),
             FakeResponse({"data": [{"error": "schema changed"}]}),
-            FakeResponse({"data": [{
-                "value": "",
-                "value_classification": "Greed",
-            }]}),
-            FakeResponse({"data": [{
-                "value": "not-a-number",
-                "value_classification": "Greed",
-            }]}),
-            FakeResponse({"data": [{
-                "value": "101",
-                "value_classification": "Greed",
-            }]}),
-            FakeResponse({"data": [{
-                "value": "70",
-                "value_classification": 123,
-            }]}),
+            FakeResponse(
+                {
+                    "data": [
+                        {
+                            "value": "",
+                            "value_classification": "Greed",
+                        }
+                    ]
+                }
+            ),
+            FakeResponse(
+                {
+                    "data": [
+                        {
+                            "value": "not-a-number",
+                            "value_classification": "Greed",
+                        }
+                    ]
+                }
+            ),
+            FakeResponse(
+                {
+                    "data": [
+                        {
+                            "value": "101",
+                            "value_classification": "Greed",
+                        }
+                    ]
+                }
+            ),
+            FakeResponse(
+                {
+                    "data": [
+                        {
+                            "value": "70",
+                            "value_classification": 123,
+                        }
+                    ]
+                }
+            ),
             FakeResponse({"data": "market_cap_percentage"}),
             FakeResponse({"data": {"market_cap_percentage": None}}),
             FakeResponse({"data": {"market_cap_percentage": {}}}),
@@ -427,10 +464,52 @@ async def test_fetch_market_helpers_return_structured_success(monkeypatch):
     )
     main_module.COINGECKO_API_KEY = "test-key"
 
-    assert await main_module._fetch_fear_and_greed_index() == _market_ok(
-        fear_and_greed
-    )
+    assert await main_module._fetch_fear_and_greed_index() == _market_ok(fear_and_greed)
     assert await main_module._fetch_global_market_data() == _market_ok(global_market)
+
+
+@pytest.mark.asyncio
+async def test_lifespan_reuses_one_http_client_for_upstream_requests(monkeypatch):
+    created_clients = []
+
+    class RecordingHttpClient:
+        def __init__(self):
+            self.requested_urls = []
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def get(self, url, **kwargs):
+            self.requested_urls.append(url)
+            if "alternative.me" in url:
+                return FakeResponse({"data": [{"value": "70", "value_classification": "Greed"}]})
+            return FakeResponse({"data": {"market_cap_percentage": {"btc": 52.3, "eth": 18.1}}})
+
+    def create_http_client():
+        http_client = RecordingHttpClient()
+        created_clients.append(http_client)
+        return http_client
+
+    main_module.COINGECKO_API_KEY = "test-key"
+    monkeypatch.setattr(main_module.httpx, "AsyncClient", create_http_client)
+
+    async with main_module.lifespan(None):
+        assert await main_module._fetch_fear_and_greed_index() == _market_ok(
+            {"value": "70", "value_classification": "Greed"}
+        )
+        assert await main_module._fetch_global_market_data() == _market_ok(
+            {"market_cap_percentage": {"btc": 52.3, "eth": 18.1}}
+        )
+
+    assert len(created_clients) == 1
+    assert created_clients[0].requested_urls == [
+        main_module.ALTERNATIVE_ME_FEAR_AND_GREED_URL,
+        main_module.COINGECKO_GLOBAL_MARKET_URL,
+    ]
+    assert main_module.upstream_http_client is None
 
 
 @pytest.mark.asyncio
@@ -511,9 +590,11 @@ async def test_market_overview_reports_no_whale_movement_when_no_alerts(monkeypa
     monkeypatch.setattr(
         main_module,
         "_fetch_whale_alerts",
-        lambda: _resolved(main_module.WhaleAlertResult(
-            main_module.TelegramFetchStatus.NO_MESSAGES,
-        )),
+        lambda: _resolved(
+            main_module.WhaleAlertResult(
+                main_module.TelegramFetchStatus.NO_MESSAGES,
+            )
+        ),
     )
 
     report = await _tool_callable("get_market_overview")()
@@ -536,10 +617,12 @@ async def test_market_overview_bounds_whale_alert_text(monkeypatch):
     monkeypatch.setattr(
         main_module,
         "_fetch_whale_alerts",
-        lambda: _resolved(main_module.WhaleAlertResult(
-            main_module.TelegramFetchStatus.OK,
-            ("x" * 100_000,),
-        )),
+        lambda: _resolved(
+            main_module.WhaleAlertResult(
+                main_module.TelegramFetchStatus.OK,
+                ("x" * 100_000,),
+            )
+        ),
     )
 
     report = await _tool_callable("get_market_overview")()
@@ -555,10 +638,14 @@ async def test_market_overview_bounds_fear_and_greed_fields(monkeypatch):
     monkeypatch.setattr(
         main_module,
         "_fetch_fear_and_greed_index",
-        lambda: _resolved(_market_ok({
-            "value": "1" * 100_000,
-            "value_classification": "x" * 100_000,
-        })),
+        lambda: _resolved(
+            _market_ok(
+                {
+                    "value": "1" * 100_000,
+                    "value_classification": "x" * 100_000,
+                }
+            )
+        ),
     )
     monkeypatch.setattr(
         main_module,
@@ -568,9 +655,11 @@ async def test_market_overview_bounds_fear_and_greed_fields(monkeypatch):
     monkeypatch.setattr(
         main_module,
         "_fetch_whale_alerts",
-        lambda: _resolved(main_module.WhaleAlertResult(
-            main_module.TelegramFetchStatus.NO_MESSAGES,
-        )),
+        lambda: _resolved(
+            main_module.WhaleAlertResult(
+                main_module.TelegramFetchStatus.NO_MESSAGES,
+            )
+        ),
     )
 
     report = await _tool_callable("get_market_overview")()
@@ -604,7 +693,9 @@ async def test_coin_details_rejects_missing_coin_id_without_request(monkeypatch,
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("coin_id", ["x" * 201, "bitcoin/market", "bitcoin?x=1", "bitcoin.coin"])
-async def test_coin_details_rejects_unsafe_or_oversized_coin_id_without_request(monkeypatch, coin_id):
+async def test_coin_details_rejects_unsafe_or_oversized_coin_id_without_request(
+    monkeypatch, coin_id
+):
     class _FailingAsyncClient:
         def __init__(self):
             raise AssertionError("CoinGecko request should not be created")
@@ -636,11 +727,11 @@ async def test_coin_details_accepts_and_normalizes_safe_coin_ids(
     normalized_id,
 ):
     main_module.COINGECKO_API_KEY = "test-key"
-    requested_urls = []
+    recorded_requests = []
 
     class RecordingAsyncClient(FakeAsyncClient):
         async def get(self, url, **kwargs):
-            requested_urls.append(url)
+            recorded_requests.append((url, kwargs))
             return await super().get(url, **kwargs)
 
     response = FakeResponse({"name": "Bitcoin", "symbol": "btc"})
@@ -648,10 +739,15 @@ async def test_coin_details_accepts_and_normalizes_safe_coin_ids(
 
     await _tool_callable("get_coin_details")(coin_id)
 
-    assert requested_urls == [
-        f"https://api.coingecko.com/api/v3/coins/{normalized_id}"
-        "?localization=false&tickers=false&community_data=false&developer_data=false"
-    ]
+    assert len(recorded_requests) == 1
+    requested_url, requested_options = recorded_requests[0]
+    assert requested_url == f"https://api.coingecko.com/api/v3/coins/{normalized_id}"
+    assert requested_options["params"] == {
+        "localization": "false",
+        "tickers": "false",
+        "community_data": "false",
+        "developer_data": "false",
+    }
 
 
 @pytest.mark.asyncio
@@ -679,25 +775,39 @@ async def test_coin_details_formats_successful_response(monkeypatch):
 @pytest.mark.asyncio
 async def test_fastmcp_client_preserves_coin_detail_contract(monkeypatch):
     main_module.COINGECKO_API_KEY = "test-key"
-    responses = iter(
-        [
-            FakeResponse(
-                {
-                    "name": "Bitcoin",
-                    "symbol": "btc",
-                    "market_cap_rank": 1,
-                    "market_data": {"current_price": {"krw": 123456789}},
-                    "links": {"homepage": ["https://bitcoin.org"]},
-                }
-            ),
-            FakeResponse({}, status_code=404),
-            FakeResponse({}),
-        ]
-    )
+
+    class SequentialResponseAsyncClient:
+        def __init__(self):
+            self._responses = iter(
+                [
+                    FakeResponse(
+                        {
+                            "name": "Bitcoin",
+                            "symbol": "btc",
+                            "market_cap_rank": 1,
+                            "market_data": {"current_price": {"krw": 123456789}},
+                            "links": {"homepage": ["https://bitcoin.org"]},
+                        }
+                    ),
+                    FakeResponse({}, status_code=404),
+                    FakeResponse({}),
+                ]
+            )
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def get(self, *args, **kwargs):
+            return next(self._responses)
+
+    shared_http_client = SequentialResponseAsyncClient()
     monkeypatch.setattr(
         main_module.httpx,
         "AsyncClient",
-        lambda: FakeAsyncClient(next(responses)),
+        lambda: shared_http_client,
     )
 
     async with Client(main_module.mcp) as client:
@@ -787,7 +897,7 @@ async def test_coin_details_formats_null_and_empty_optional_fields(monkeypatch):
 
     assert "Unknown coin" in report
     assert "(N/A)" in report
-    assert "시가총액 순위: N/A위" in report
+    assert "시가총액 순위: N/A" in report
     assert "현재 가격: N/A" in report
     assert "홈페이지: N/A" in report
 
@@ -835,7 +945,7 @@ async def test_coin_details_bounds_and_validates_upstream_fields(monkeypatch):
 
     report = await _tool_callable("get_coin_details")("bounded")
 
-    assert "시가총액 순위: N/A위" in report
+    assert "시가총액 순위: N/A" in report
     assert "현재 가격: N/A" in report
     assert report.count("...") == 3
     assert len(report) < 1_000
@@ -996,6 +1106,26 @@ async def test_mcp_tool_schemas_publish_runtime_constraints():
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("api_id", "api_hash", "session_string"),
+    [(None, "hash", "session"), (123, "", "session"), (123, "hash", "")],
+)
+async def test_lifespan_skips_incomplete_telegram_config(
+    monkeypatch, api_id, api_hash, session_string
+):
+    monkeypatch.setattr(main_module, "TELEGRAM_API_ID", api_id)
+    monkeypatch.setattr(main_module, "TELEGRAM_API_HASH", api_hash)
+    monkeypatch.setattr(main_module, "TELEGRAM_SESSION_STRING", session_string)
+
+    def unexpected_client(*args, **kwargs):
+        pytest.fail("Incomplete configuration must not construct a Telegram client")
+
+    monkeypatch.setattr(main_module, "TelegramClient", unexpected_client)
+    async with main_module.lifespan(None):
+        assert main_module.telegram_client_state is main_module.TelegramAvailability.NOT_CONFIGURED
+
+
+@pytest.mark.asyncio
 async def test_lifespan_disables_telegram_when_startup_connection_fails(monkeypatch):
     main_module.TELEGRAM_API_ID = "123"
     main_module.TELEGRAM_API_HASH = "hash"
@@ -1004,7 +1134,7 @@ async def test_lifespan_disables_telegram_when_startup_connection_fails(monkeypa
     monkeypatch.setattr(main_module, "TelegramClient", FailingStartupTelegramClient)
 
     async with main_module.lifespan(None):
-        assert main_module.telegram_runtime is main_module.TelegramAvailability.UNAVAILABLE
+        assert main_module.telegram_client_state is main_module.TelegramAvailability.UNAVAILABLE
 
 
 @pytest.mark.asyncio
@@ -1024,10 +1154,12 @@ async def test_lifespan_disables_telegram_when_startup_times_out(monkeypatch):
     main_module.TELEGRAM_SESSION_STRING = "session"
     monkeypatch.setattr(main_module, "TELEGRAM_OPERATION_TIMEOUT_SECONDS", 0.01)
     monkeypatch.setattr(main_module, "StringSession", lambda session: object())
-    monkeypatch.setattr(main_module, "TelegramClient", lambda *args, **kwargs: HangingStartupTelegramClient())
+    monkeypatch.setattr(
+        main_module, "TelegramClient", lambda *args, **kwargs: HangingStartupTelegramClient()
+    )
 
     async with main_module.lifespan(None):
-        assert main_module.telegram_runtime is main_module.TelegramAvailability.UNAVAILABLE
+        assert main_module.telegram_client_state is main_module.TelegramAvailability.UNAVAILABLE
 
 
 @pytest.mark.asyncio
@@ -1041,7 +1173,7 @@ async def test_lifespan_disconnects_telegram_when_startup_authorization_fails(mo
     monkeypatch.setattr(main_module, "TelegramClient", lambda *args, **kwargs: fake_client)
 
     async with main_module.lifespan(None):
-        assert main_module.telegram_runtime is main_module.TelegramAvailability.UNAUTHORIZED
+        assert main_module.telegram_client_state is main_module.TelegramAvailability.UNAUTHORIZED
 
     assert fake_client.disconnected is True
 
@@ -1057,7 +1189,7 @@ async def test_lifespan_swallows_disconnect_failure_when_startup_authorization_f
     monkeypatch.setattr(main_module, "TelegramClient", lambda *args, **kwargs: fake_client)
 
     async with main_module.lifespan(None):
-        assert main_module.telegram_runtime is main_module.TelegramAvailability.UNAUTHORIZED
+        assert main_module.telegram_client_state is main_module.TelegramAvailability.UNAUTHORIZED
 
     assert fake_client.disconnect_calls == 1
 
@@ -1072,10 +1204,10 @@ async def test_lifespan_disconnects_authorized_client_and_clears_reference(monke
     monkeypatch.setattr(main_module, "TelegramClient", lambda *args, **kwargs: fake_client)
 
     async with main_module.lifespan(None):
-        assert main_module.telegram_runtime is fake_client
+        assert main_module.telegram_client_state is fake_client
 
     assert fake_client.disconnected is True
-    assert main_module.telegram_runtime is main_module.TelegramAvailability.UNAVAILABLE
+    assert main_module.telegram_client_state is main_module.TelegramAvailability.UNAVAILABLE
 
 
 @pytest.mark.asyncio
@@ -1088,10 +1220,10 @@ async def test_lifespan_clears_reference_when_authorized_cleanup_fails(monkeypat
     monkeypatch.setattr(main_module, "TelegramClient", lambda *args, **kwargs: fake_client)
 
     async with main_module.lifespan(None):
-        assert main_module.telegram_runtime is fake_client
+        assert main_module.telegram_client_state is fake_client
 
     assert fake_client.disconnected is True
-    assert main_module.telegram_runtime is main_module.TelegramAvailability.UNAVAILABLE
+    assert main_module.telegram_client_state is main_module.TelegramAvailability.UNAVAILABLE
 
 
 @pytest.mark.asyncio
@@ -1110,10 +1242,10 @@ async def test_lifespan_bounds_authorized_cleanup_time(monkeypatch):
     monkeypatch.setattr(main_module, "TelegramClient", lambda *args, **kwargs: fake_client)
 
     async with main_module.lifespan(None):
-        assert main_module.telegram_runtime is fake_client
+        assert main_module.telegram_client_state is fake_client
 
     assert fake_client.disconnected is True
-    assert main_module.telegram_runtime is main_module.TelegramAvailability.UNAVAILABLE
+    assert main_module.telegram_client_state is main_module.TelegramAvailability.UNAVAILABLE
 
 
 @pytest.mark.asyncio
@@ -1164,7 +1296,7 @@ async def test_fastmcp_client_follows_news_reference_to_full_message(monkeypatch
     assert message_result.is_error is False
     assert message_text == "protocol full message"
     assert fake_client.disconnected is True
-    assert main_module.telegram_runtime is main_module.TelegramAvailability.UNAVAILABLE
+    assert main_module.telegram_client_state is main_module.TelegramAvailability.UNAVAILABLE
 
 
 @pytest.mark.asyncio
@@ -1183,21 +1315,16 @@ async def test_fastmcp_client_reports_total_news_failure_as_error(monkeypatch):
             raise_on_error=False,
         )
 
-    error_text = "\n".join(
-        block.text for block in result.content if getattr(block, "text", None)
-    )
+    error_text = "\n".join(block.text for block in result.content if getattr(block, "text", None))
     assert result.is_error is True
-    assert (
-        error_text.partition(": ")[0]
-        == main_module.ToolErrorCode.TELEGRAM_UPSTREAM_ERROR.value
-    )
+    assert error_text.partition(": ")[0] == main_module.ToolErrorCode.TELEGRAM_UPSTREAM_ERROR.value
     assert fake_client.disconnected is True
-    assert main_module.telegram_runtime is main_module.TelegramAvailability.UNAVAILABLE
+    assert main_module.telegram_client_state is main_module.TelegramAvailability.UNAVAILABLE
 
 
 @pytest.mark.asyncio
 async def test_realtime_news_uses_telegram_client():
-    main_module.telegram_runtime = FakeTelegramClient(
+    main_module.telegram_client_state = FakeTelegramClient(
         {
             "wublockchainenglish": [FakeMessage("line1\nline2", date=_dt())],
             "watcherguru": [],
@@ -1232,7 +1359,7 @@ async def test_realtime_news_bounds_preview_at_150_characters(
     truncated,
     marker_present,
 ):
-    main_module.telegram_runtime = FakeTelegramClient(
+    main_module.telegram_client_state = FakeTelegramClient(
         {
             "wublockchainenglish": [FakeMessage(text, date=_dt())],
             "watcherguru": [],
@@ -1250,7 +1377,7 @@ async def test_realtime_news_bounds_preview_at_150_characters(
 
 @pytest.mark.asyncio
 async def test_realtime_news_accepts_inclusive_72_hour_boundary():
-    main_module.telegram_runtime = FakeTelegramClient(
+    main_module.telegram_client_state = FakeTelegramClient(
         {
             "wublockchainenglish": [],
             "watcherguru": [],
@@ -1270,13 +1397,15 @@ async def test_realtime_news_accepts_inclusive_72_hour_boundary():
 @pytest.mark.parametrize("message_id", [None, 0, True, "1"])
 async def test_realtime_news_rejects_unusable_message_references(message_id):
     result = await main_module._fetch_news_channel(
-        FakeTelegramClient({
-            "wublockchainenglish": [
-                FakeMessage("unusable reference", _dt(), message_id=message_id),
-            ],
-        }),
+        FakeTelegramClient(
+            {
+                "wublockchainenglish": [
+                    FakeMessage("unusable reference", _dt(), message_id=message_id),
+                ],
+            }
+        ),
         "wublockchainenglish",
-        datetime.now(timezone.utc) - timedelta(hours=1),
+        datetime.now(UTC) - timedelta(hours=1),
     )
 
     assert result.messages == ()
@@ -1285,7 +1414,7 @@ async def test_realtime_news_rejects_unusable_message_references(message_id):
 
 @pytest.mark.asyncio
 async def test_realtime_news_returns_newest_messages_and_stops_before_since():
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     client = RecordingTelegramClient(
         {
             "wublockchainenglish": [
@@ -1298,7 +1427,7 @@ async def test_realtime_news_returns_newest_messages_and_stops_before_since():
             ],
         }
     )
-    main_module.telegram_runtime = client
+    main_module.telegram_client_state = client
 
     result = await _tool_callable("get_realtime_news")(1)
     report = _tool_result_text(result)
@@ -1316,8 +1445,8 @@ async def test_realtime_news_returns_newest_messages_and_stops_before_since():
 
 @pytest.mark.asyncio
 async def test_realtime_news_normalizes_naive_dates_as_utc():
-    naive_date = datetime.now(timezone.utc).replace(tzinfo=None, microsecond=0)
-    main_module.telegram_runtime = FakeTelegramClient(
+    naive_date = datetime.now(UTC).replace(tzinfo=None, microsecond=0)
+    main_module.telegram_client_state = FakeTelegramClient(
         {
             "wublockchainenglish": [FakeMessage("naive timestamp", naive_date)],
             "watcherguru": [],
@@ -1339,7 +1468,7 @@ async def test_realtime_news_preserves_results_when_one_channel_fails():
                 raise RuntimeError("channel unavailable")
             yield FakeMessage("available news", _dt())
 
-    main_module.telegram_runtime = PartiallyFailingTelegramClient()
+    main_module.telegram_client_state = PartiallyFailingTelegramClient()
 
     result = await _tool_callable("get_realtime_news")(1)
     report = _tool_result_text(result)
@@ -1366,14 +1495,12 @@ async def test_realtime_news_reports_no_news_when_other_channel_fails():
             if False:
                 yield
 
-    main_module.telegram_runtime = EmptyAndFailingTelegramClient()
+    main_module.telegram_client_state = EmptyAndFailingTelegramClient()
 
     result = await _tool_callable("get_realtime_news")(1)
     report = _tool_result_text(result)
 
-    assert report.startswith(
-        "지난 1시간 동안 조회에 성공한 채널에서는 새로운 뉴스가 없습니다."
-    )
+    assert report.startswith("지난 1시간 동안 조회에 성공한 채널에서는 새로운 뉴스가 없습니다.")
     assert "조회 실패 채널" in report
     assert "@watcherguru" in report
     assert result.structured_content == {
@@ -1396,7 +1523,7 @@ async def test_realtime_news_errors_when_all_channels_fail():
             raise RuntimeError("channel unavailable")
             yield
 
-    main_module.telegram_runtime = FailingTelegramClient()
+    main_module.telegram_client_state = FailingTelegramClient()
 
     await _assert_crypto_error(
         _tool_callable("get_realtime_news")(1),
@@ -1412,7 +1539,7 @@ async def test_realtime_news_does_not_expose_unbounded_channel_errors():
                 raise RuntimeError("e" * 100_000)
             yield FakeMessage("available news", _dt())
 
-    main_module.telegram_runtime = PartiallyFailingTelegramClient()
+    main_module.telegram_client_state = PartiallyFailingTelegramClient()
 
     result = await _tool_callable("get_realtime_news")(1)
     report = _tool_result_text(result)
@@ -1434,7 +1561,7 @@ async def test_realtime_news_reports_channel_timeouts(monkeypatch):
     result = await main_module._fetch_news_channel(
         HangingTelegramClient(),
         "watcherguru",
-        datetime.now(timezone.utc) - timedelta(hours=1),
+        datetime.now(UTC) - timedelta(hours=1),
     )
 
     assert result.messages == ()
@@ -1449,7 +1576,7 @@ async def test_realtime_news_errors_when_all_channels_timeout(monkeypatch):
             yield
 
     monkeypatch.setattr(main_module, "TELEGRAM_OPERATION_TIMEOUT_SECONDS", 0.01)
-    main_module.telegram_runtime = HangingTelegramClient()
+    main_module.telegram_client_state = HangingTelegramClient()
 
     await _assert_crypto_error(
         _tool_callable("get_realtime_news")(1),
@@ -1469,7 +1596,7 @@ async def test_realtime_news_prefers_upstream_error_for_mixed_total_failure(monk
                 yield
 
     monkeypatch.setattr(main_module, "TELEGRAM_OPERATION_TIMEOUT_SECONDS", 0.01)
-    main_module.telegram_runtime = MixedFailureTelegramClient()
+    main_module.telegram_client_state = MixedFailureTelegramClient()
 
     await _assert_crypto_error(
         _tool_callable("get_realtime_news")(1),
@@ -1479,7 +1606,7 @@ async def test_realtime_news_prefers_upstream_error_for_mixed_total_failure(monk
 
 @pytest.mark.asyncio
 async def test_whale_alerts_return_newest_messages_and_stop_before_since():
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     client = RecordingTelegramClient(
         {
             "whale_alert_io": [
@@ -1488,7 +1615,7 @@ async def test_whale_alerts_return_newest_messages_and_stop_before_since():
             ]
         }
     )
-    main_module.telegram_runtime = client
+    main_module.telegram_client_state = client
 
     result = await main_module._fetch_whale_alerts()
 
@@ -1501,7 +1628,7 @@ async def test_whale_alerts_return_newest_messages_and_stop_before_since():
 
 @pytest.mark.asyncio
 async def test_whale_alerts_reports_unauthorized_state():
-    main_module.telegram_runtime = main_module.TelegramAvailability.UNAUTHORIZED
+    main_module.telegram_client_state = main_module.TelegramAvailability.UNAUTHORIZED
 
     assert await main_module._fetch_whale_alerts() == main_module.WhaleAlertResult(
         main_module.TelegramFetchStatus.UNAUTHORIZED,
@@ -1510,7 +1637,7 @@ async def test_whale_alerts_reports_unauthorized_state():
 
 @pytest.mark.asyncio
 async def test_whale_alerts_reports_unavailable_when_initialization_failed():
-    main_module.telegram_runtime = main_module.TelegramAvailability.UNAVAILABLE
+    main_module.telegram_client_state = main_module.TelegramAvailability.UNAVAILABLE
 
     assert await main_module._fetch_whale_alerts() == main_module.WhaleAlertResult(
         main_module.TelegramFetchStatus.UNAVAILABLE,
@@ -1524,7 +1651,7 @@ async def test_whale_alerts_reports_fetch_failure():
             raise RuntimeError("channel unavailable")
             yield
 
-    main_module.telegram_runtime = FailingWhaleClient()
+    main_module.telegram_client_state = FailingWhaleClient()
 
     assert await main_module._fetch_whale_alerts() == main_module.WhaleAlertResult(
         main_module.TelegramFetchStatus.FETCH_FAILED,
@@ -1533,7 +1660,7 @@ async def test_whale_alerts_reports_fetch_failure():
 
 @pytest.mark.asyncio
 async def test_whale_alerts_reports_no_messages():
-    main_module.telegram_runtime = FakeTelegramClient({"whale_alert_io": []})
+    main_module.telegram_client_state = FakeTelegramClient({"whale_alert_io": []})
 
     assert await main_module._fetch_whale_alerts() == main_module.WhaleAlertResult(
         main_module.TelegramFetchStatus.NO_MESSAGES,
@@ -1548,7 +1675,7 @@ async def test_whale_alerts_reports_timeout(monkeypatch):
             yield
 
     monkeypatch.setattr(main_module, "TELEGRAM_OPERATION_TIMEOUT_SECONDS", 0.01)
-    main_module.telegram_runtime = HangingWhaleClient()
+    main_module.telegram_client_state = HangingWhaleClient()
 
     assert await main_module._fetch_whale_alerts() == main_module.WhaleAlertResult(
         main_module.TelegramFetchStatus.FETCH_FAILED,
@@ -1557,7 +1684,7 @@ async def test_whale_alerts_reports_timeout(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_realtime_news_reports_clear_no_news_when_channels_are_empty():
-    main_module.telegram_runtime = FakeTelegramClient(
+    main_module.telegram_client_state = FakeTelegramClient(
         {
             "wublockchainenglish": [],
             "watcherguru": [],
@@ -1608,7 +1735,7 @@ async def test_telegram_message_returns_full_text():
             assert ids == 42
             return FakeMessage("full message", _dt())
 
-    main_module.telegram_runtime = FakeMessageClient()
+    main_module.telegram_client_state = FakeMessageClient()
 
     result = await _tool_callable("get_telegram_message")("watcherguru", 42)
 
@@ -1624,13 +1751,13 @@ async def test_telegram_message_reports_missing_and_non_text_messages():
         async def get_messages(self, channel, ids):
             return self.message
 
-    main_module.telegram_runtime = FakeMessageClient(None)
+    main_module.telegram_client_state = FakeMessageClient(None)
     await _assert_crypto_error(
         _tool_callable("get_telegram_message")("watcherguru", 42),
         main_module.ToolErrorCode.TELEGRAM_MESSAGE_NOT_FOUND,
     )
 
-    main_module.telegram_runtime = FakeMessageClient(FakeMessage(None, _dt()))
+    main_module.telegram_client_state = FakeMessageClient(FakeMessage(None, _dt()))
     await _assert_crypto_error(
         _tool_callable("get_telegram_message")("watcherguru", 42),
         main_module.ToolErrorCode.TELEGRAM_MESSAGE_NOT_TEXT,
@@ -1643,7 +1770,7 @@ async def test_telegram_message_wraps_upstream_failure():
         async def get_messages(self, channel, ids):
             raise RuntimeError("telegram unavailable")
 
-    main_module.telegram_runtime = FailingMessageClient()
+    main_module.telegram_client_state = FailingMessageClient()
 
     await _assert_crypto_error(
         _tool_callable("get_telegram_message")("watcherguru", 42),
@@ -1658,7 +1785,7 @@ async def test_telegram_message_reports_timeout(monkeypatch):
             await asyncio.sleep(1)
 
     monkeypatch.setattr(main_module, "TELEGRAM_OPERATION_TIMEOUT_SECONDS", 0.01)
-    main_module.telegram_runtime = HangingMessageClient()
+    main_module.telegram_client_state = HangingMessageClient()
 
     await _assert_crypto_error(
         _tool_callable("get_telegram_message")("watcherguru", 42),
@@ -1705,4 +1832,4 @@ def _market_not_configured():
 
 
 def _dt():
-    return datetime.now(timezone.utc)
+    return datetime.now(UTC)
