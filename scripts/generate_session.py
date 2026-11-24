@@ -1,6 +1,8 @@
 import asyncio
 import os
 import sys
+from collections.abc import Awaitable
+from typing import cast
 
 from dotenv import load_dotenv
 from telethon import TelegramClient
@@ -20,7 +22,7 @@ def load_telegram_config() -> tuple[int, str]:
         }.items()
         if not value
     ]
-    if missing:
+    if missing or api_id is None or api_hash is None:
         raise RuntimeError(f"Missing required environment variable(s): {', '.join(missing)}")
 
     try:
@@ -31,23 +33,24 @@ def load_telegram_config() -> tuple[int, str]:
     return parsed_api_id, api_hash
 
 
-async def main():
+async def main() -> None:
     api_id, api_hash = load_telegram_config()
-    client = TelegramClient(StringSession(), api_id, api_hash)
+    telegram_client = TelegramClient(StringSession(), api_id, api_hash)
     try:
         print("\nStarting Telegram login flow...")
         try:
-            await client.start()
+            await cast(Awaitable[object], telegram_client.start())
         except EOFError as exc:
             raise RuntimeError(
                 "Telegram login requires interactive input. Re-run this command "
                 "in an interactive terminal so Telethon can prompt for your phone, "
                 "login code, or bot token."
             ) from exc
-        if not await client.is_user_authorized():
+        if not await telegram_client.is_user_authorized():
             raise RuntimeError("Telegram authorization failed; no session string was generated.")
 
-        session_string = client.session.save()
+        session = cast(StringSession, telegram_client.session)
+        session_string = session.save()
         if not session_string:
             raise RuntimeError("Telegram returned an empty session string.")
 
@@ -55,8 +58,8 @@ async def main():
         print(session_string)
     finally:
         try:
-            if client.is_connected():
-                await client.disconnect()
+            if telegram_client.is_connected():
+                await cast(Awaitable[object], telegram_client.disconnect())
         except Exception as exc:
             print(f"Telegram cleanup failed: {exc}", file=sys.stderr)
 

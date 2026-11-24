@@ -1,94 +1,94 @@
-# 파일 2: FastMCP 클라이언트
+"""Optional Gemini-powered conversational client for the MCP service."""
 
-import os
 import argparse
 import asyncio
-from typing import Optional, Any
+import os
+from contextlib import AsyncExitStack
+from typing import Any
 
 from dotenv import load_dotenv
-
 from mcp import ClientSession
 from mcp.client.streamable_http import streamablehttp_client
 from mcp.types import CallToolResult
 
-# .env 파일에서 환경 변수 로드
 load_dotenv()
 
+GEMINI_MODEL = "gemini-2.5-flash"
 MAX_TOOL_CALL_TURNS = 5
 MAX_TOOL_CALLS = 20
+QUIT_COMMANDS = frozenset({"quit", "exit"})
 
 
-def _load_gemini():
+def _load_gemini() -> tuple[Any, Any]:
+    """Load the optional SDK without making ``--help`` depend on it."""
     try:
-        import google.genai as genai
-        from google.genai import types
+        import google.genai as genai  # pyright: ignore[reportMissingImports]
+        from google.genai import types  # pyright: ignore[reportMissingImports]
     except ModuleNotFoundError as exc:
         missing_module = exc.name or ""
-        if (
-            missing_module == "google"
-            or missing_module == "google.genai"
-            or missing_module.startswith("google.genai.")
+        if missing_module in {"google", "google.genai"} or missing_module.startswith(
+            "google.genai."
         ):
             raise RuntimeError(
-                "Gemini client dependency is missing. Install it with "
-                "`uv run --with google-genai python example/client.py --host localhost --port 8123` "
-                "or add `google-genai` to your development dependencies."
+                "Gemini client dependency is missing. Run this example with "
+                "`uv run --with google-genai python example/client.py`."
             ) from exc
         raise
-
     return genai, types
 
 
 def _tool_result_response(tool_result: CallToolResult) -> dict[str, Any]:
-    """Convert every MCP content block into Gemini-safe structured response data."""
-    response = {
+    """Convert all MCP content blocks into Gemini function-response data."""
+    function_response_payload: dict[str, Any] = {
         "content": [
-            block.model_dump(mode="json", exclude_none=True)
-            for block in tool_result.content
+            block.model_dump(mode="json", exclude_none=True) for block in tool_result.content
         ],
         "isError": tool_result.isError,
     }
     if tool_result.structuredContent is not None:
-        response["structuredContent"] = tool_result.structuredContent
-    return response
+        function_response_payload["structuredContent"] = tool_result.structuredContent
+    return function_response_payload
 
 
 class CryptoAssistantClient:
-    """
-    'Intelligent Crypto Assistant' MCP 서버와 통신하는 클라이언트 클래스.
-    Gemini를 사용하여 사용자의 질문을 이해하고 서버의 도구를 호출합니다.
-    """
-    def __init__(self):
-        self._genai, self._types = _load_gemini()
+    """Bridge Gemini function calls to a crypto-info-mcp session."""
+
+    def __init__(self) -> None:
+        self._genai_module, self._gemini_types = _load_gemini()
         api_key = os.getenv("GOOGLE_API_KEY")
         if not api_key:
-            raise RuntimeError(
-                "GOOGLE_API_KEY is required for the conversational example client."
-            )
-        self._gemini_client = self._genai.Client(api_key=api_key)
-        self.session: Optional[ClientSession] = None
-        self.chat = None
-        self._streams_context = None
-        self._session_context = None
+            raise RuntimeError("GOOGLE_API_KEY is required for the conversational example client.")
 
-    async def connect(self, server_url: str):
-        """지정된 URL의 MCP 서버에 연결하고 세션을 초기화합니다."""
-        print(f"...{server_url} 에 연결 중...")
+        self._gemini_client = self._genai_module.Client(api_key=api_key)
+        self._exit_stack = AsyncExitStack()
+        self._mcp_session: ClientSession | None = None
+        self._gemini_chat: Any | None = None
+
+    async def connect(self, server_url: str) -> None:
+        """Open and initialize an MCP session."""
+        print(f"Connecting to {server_url} ...")
         try:
-            self._streams_context = streamablehttp_client(url=server_url, headers={})
-            read_stream, write_stream, _ = await self._streams_context.__aenter__()
-            self._session_context = ClientSession(read_stream, write_stream)
-            self.session = await self._session_context.__aenter__()
-            await self.session.initialize()
-            print("✅ 서버에 성공적으로 연결되었습니다!")
-        except Exception as e:
-            print(f"❌ 서버 연결 실패: {e}")
+            read_stream, write_stream, _ = await self._exit_stack.enter_async_context(
+                streamablehttp_client(url=server_url, headers={})
+            )
+            session = await self._exit_stack.enter_async_context(
+                ClientSession(read_stream, write_stream)
+            )
+            await session.initialize()
+        except Exception:
+            self._mcp_session = None
+            try:
+                await self._exit_stack.aclose()
+            except Exception as cleanup_error:
+                print(f"Client cleanup warning: {cleanup_error}")
             raise
 
-    def _mcp_tools_to_gemini_tools(self, mcp_tools: list) -> list[Any]:
-        """MCP 도구 스키마를 Gemini가 이해할 수 있는 형식으로 변환합니다."""
+        self._mcp_session = session
+        print("Connected to the MCP server.")
+
+    def _mcp_tools_to_gemini_tools(self, mcp_tools: list[Any]) -> list[Any]:
         function_declarations = [
-            self._types.FunctionDeclaration(
+            self._gemini_types.FunctionDeclaration(
                 name=tool.name,
                 description=tool.description,
                 parameters_json_schema=tool.inputSchema,
@@ -97,78 +97,91 @@ class CryptoAssistantClient:
         ]
         if not function_declarations:
             return []
-        return [self._types.Tool(function_declarations=function_declarations)]
+        return [self._gemini_types.Tool(function_declarations=function_declarations)]
 
-    async def process_query(self, query: str) -> str:
-        """사용자 쿼리를 처리하고, 필요 시 도구를 호출한 뒤 최종 답변을 반환합니다."""
-        if not self.session:
-            raise ConnectionError("MCP 서버에 연결되지 않았습니다.")
-
-        # 서버로부터 사용 가능한 도구 목록을 가져와 Gemini 형식으로 변환
-        response = await self.session.list_tools()
-        available_tools = self._mcp_tools_to_gemini_tools(response.tools)
-
-        if self.chat is None:
-            self.chat = self._gemini_client.chats.create(
-                model="gemini-2.5-flash",
-                config=self._types.GenerateContentConfig(
+    def _ensure_chat(self, available_tools: list[Any]) -> Any:
+        if self._gemini_chat is None:
+            self._gemini_chat = self._gemini_client.chats.create(
+                model=GEMINI_MODEL,
+                config=self._gemini_types.GenerateContentConfig(
                     system_instruction=(
-                        "당신은 친절하고 전문적인 암호화폐 시장 분석가입니다. "
-                        "사용자의 질문에 답하기 위해 사용 가능한 도구를 활용하세요."
+                        "당신은 암호화폐 시장 정보를 간결하게 설명하는 분석 도우미입니다. "
+                        "사실 확인에 필요한 경우 제공된 MCP 도구를 사용하고, "
+                        "도구 결과에 없는 사실은 추측하지 마세요."
                     ),
                     tools=available_tools,
-                    automatic_function_calling=self._types.AutomaticFunctionCallingConfig(
+                    automatic_function_calling=self._gemini_types.AutomaticFunctionCallingConfig(
                         disable=True
                     ),
                 ),
             )
+        return self._gemini_chat
 
-        print("...Gemini에게 질문을 보내는 중...")
-        response = await asyncio.to_thread(
-            self.chat.send_message,
-            query,
+    @staticmethod
+    def _function_calls(model_response: Any) -> list[Any]:
+        return [
+            part.function_call
+            for part in getattr(model_response, "parts", [])
+            if getattr(part, "function_call", None)
+        ]
+
+    async def _execute_tool_calls(self, function_calls: list[Any]) -> list[Any]:
+        if self._mcp_session is None:
+            raise ConnectionError("MCP 서버에 연결되지 않았습니다.")
+
+        requested_calls = [
+            (function_call.name, dict(function_call.args)) for function_call in function_calls
+        ]
+        for tool_name, tool_arguments in requested_calls:
+            print(f"Calling MCP tool: {tool_name}({tool_arguments})")
+
+        results = await asyncio.gather(
+            *(
+                self._mcp_session.call_tool(tool_name, tool_arguments)
+                for tool_name, tool_arguments in requested_calls
+            )
         )
-        tool_call_count = 0
+        return [
+            self._gemini_types.Part.from_function_response(
+                name=tool_name,
+                response=_tool_result_response(tool_result),
+            )
+            for (tool_name, _), tool_result in zip(
+                requested_calls,
+                results,
+                strict=True,
+            )
+        ]
+
+    async def process_query(self, query: str) -> str:
+        """Resolve one user query, including bounded MCP tool-call turns."""
+        if self._mcp_session is None:
+            raise ConnectionError("MCP 서버에 연결되지 않았습니다.")
+
+        listed_tools = await self._mcp_session.list_tools()
+        available_tools = self._mcp_tools_to_gemini_tools(listed_tools.tools)
+        chat = self._ensure_chat(available_tools)
+
+        print("Sending the query to Gemini ...")
+        model_response = await asyncio.to_thread(chat.send_message, query)
+        total_tool_calls = 0
 
         for tool_call_turn in range(MAX_TOOL_CALL_TURNS + 1):
-            function_calls = [
-                part.function_call
-                for part in getattr(response, "parts", [])
-                if getattr(part, "function_call", None)
-            ]
+            function_calls = self._function_calls(model_response)
             if not function_calls:
-                return response.text
+                return model_response.text
             if tool_call_turn == MAX_TOOL_CALL_TURNS:
                 break
-            if tool_call_count + len(function_calls) > MAX_TOOL_CALLS:
-                raise RuntimeError(
-                    f"Gemini requested more than {MAX_TOOL_CALLS} total tool calls."
-                )
-            tool_call_count += len(function_calls)
 
-            requested_calls = []
-            for function_call in function_calls:
-                tool_name = function_call.name
-                tool_args = dict(function_call.args)
-                print(f"🛠️ Gemini가 도구 호출을 요청합니다: {tool_name}({tool_args})")
-                requested_calls.append((tool_name, tool_args))
+            requested_count = len(function_calls)
+            if total_tool_calls + requested_count > MAX_TOOL_CALLS:
+                raise RuntimeError(f"Gemini requested more than {MAX_TOOL_CALLS} total tool calls.")
+            total_tool_calls += requested_count
 
-            tool_results = await asyncio.gather(*(
-                self.session.call_tool(tool_name, tool_args)
-                for tool_name, tool_args in requested_calls
-            ))
-            function_responses = []
-            for (tool_name, _), tool_result_mcp in zip(requested_calls, tool_results):
-                function_responses.append(
-                    self._types.Part.from_function_response(
-                        name=tool_name,
-                        response=_tool_result_response(tool_result_mcp),
-                    )
-                )
-
-            print("...도구 실행 결과를 Gemini에게 다시 보내는 중...")
-            response = await asyncio.to_thread(
-                self.chat.send_message,
+            function_responses = await self._execute_tool_calls(function_calls)
+            print("Returning MCP results to Gemini ...")
+            model_response = await asyncio.to_thread(
+                chat.send_message,
                 function_responses,
             )
 
@@ -176,66 +189,76 @@ class CryptoAssistantClient:
             f"Gemini requested more than {MAX_TOOL_CALL_TURNS} consecutive tool-call turns."
         )
 
-    async def chat_loop(self):
-        """사용자와 상호작용하는 메인 채팅 루프입니다."""
-        print("\n🤖 지능형 암호화폐 비서 클라이언트입니다.")
-        print("   'quit' 또는 'exit'을 입력하여 종료하세요.")
+    async def chat_loop(self) -> None:
+        """Run the interactive terminal loop."""
+        print("\nCrypto Info MCP conversational client")
+        print("Enter 'quit' or 'exit' to close the client.")
 
         while True:
             try:
-                query = input("\n👤 You: ").strip()
-                if query.lower() in ["quit", "exit"]:
+                query = (await asyncio.to_thread(input, "\nYou: ")).strip()
+                if query.lower() in QUIT_COMMANDS:
                     break
-                if not query: continue
+                if not query:
+                    continue
 
-                response_text = await self.process_query(query)
-                print(f"\n🤖 Assistant:\n{response_text}")
-
+                answer = await self.process_query(query)
+                print(f"\nAssistant:\n{answer}")
             except EOFError:
-                print("\n👋 입력이 종료되어 클라이언트를 종료합니다.")
+                print("\nInput closed; exiting the client.")
                 break
-            except Exception as e:
-                print(f"\n💥 예기치 않은 오류 발생: {e}")
-                print("   대화를 다시 시작합니다.")
-                self.chat = None # 오류 발생 시 대화 상태 초기화
-
-    async def cleanup(self):
-        """클라이언트 종료 시 연결을 안전하게 해제합니다."""
-        for label, context in (
-            ("세션", self._session_context),
-            ("스트림", self._streams_context),
-        ):
-            if context is None:
-                continue
-            try:
-                await context.__aexit__(None, None, None)
             except Exception as exc:
-                print(f"⚠️ 클라이언트 정리 경고: {label} 종료 실패: {exc}")
-        print("\n👋 클라이언트를 종료합니다.")
+                print(f"\nQuery failed: {exc}")
+                print("Starting a new Gemini conversation.")
+                self._gemini_chat = None
+
+    async def cleanup(self) -> None:
+        """Close every entered MCP context in reverse order."""
+        self._mcp_session = None
+        try:
+            await self._exit_stack.aclose()
+        except Exception as exc:
+            print(f"Client cleanup warning: {exc}")
+        print("\nClient closed.")
+
+
+def _argument_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        description="Conversational client for the Crypto Info MCP server."
+    )
+    parser.add_argument(
+        "--host",
+        default="localhost",
+        help="MCP server hostname or IP address.",
+    )
+    parser.add_argument(
+        "--port",
+        type=int,
+        default=8123,
+        help="MCP server port.",
+    )
+    return parser
+
 
 async def main() -> int:
-    """스크립트 실행 시 인자를 파싱하고 클라이언트를 시작합니다."""
-    parser = argparse.ArgumentParser(description="Client for Intelligent Crypto Assistant MCP server.")
-    parser.add_argument("--host", type=str, default="localhost", help="The hostname or IP address.")
-    parser.add_argument("--port", type=int, default=8123, help="The port number of the MCP server.") 
-    args = parser.parse_args()
-
-    server_url = f"http://{args.host}:{args.port}/mcp/"
-    client = None
+    args = _argument_parser().parse_args()
+    server_url = f"http://{args.host}:{args.port}/mcp"
+    client: CryptoAssistantClient | None = None
 
     try:
         client = CryptoAssistantClient()
         await client.connect(server_url)
         await client.chat_loop()
-        return 0
     except KeyboardInterrupt:
         return 0
-    except Exception as e:
-        print(f"클라이언트 시작 중 심각한 오류 발생: {e}")
+    except Exception as exc:
+        print(f"Client startup failed: {exc}")
         return 1
     finally:
         if client is not None:
             await client.cleanup()
+    return 0
+
 
 if __name__ == "__main__":
     raise SystemExit(asyncio.run(main()))

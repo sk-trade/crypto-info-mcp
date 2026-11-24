@@ -1,23 +1,32 @@
 services:
   crypto-info-mcp:
-      build: 
-        context: .
-        args:
-          VERSION: ${VERSION:-local}
-        tags:
-          - "crypto-info-mcp:${VERSION:-local}"
-      image: crypto-info-mcp:${VERSION:-local}
-      container_name: crypto-info-mcp
-      restart: unless-stopped
-      ports:
-        - "18123:8123"
-      networks:
-        - bridge_server
-      environment:
-        COINGECKO_API_KEY: ${COINGECKO_API_KEY:-}
-        TELEGRAM_API_ID: ${TELEGRAM_API_ID:-}
-        TELEGRAM_API_HASH: ${TELEGRAM_API_HASH:-}
-        TELEGRAM_SESSION_STRING: ${TELEGRAM_SESSION_STRING:-}
+    build:
+      context: .
+      args:
+        VERSION: ${VERSION:-local}
+      tags:
+        - "crypto-info-mcp:${VERSION:-local}"
+    image: crypto-info-mcp:${VERSION:-local}
+    restart: unless-stopped
+    init: true
+    ports:
+      - "18123:8123"
+    networks:
+      - bridge_server
+    environment:
+      COINGECKO_API_KEY: ${COINGECKO_API_KEY:-}
+      TELEGRAM_API_ID: ${TELEGRAM_API_ID:-}
+      TELEGRAM_API_HASH: ${TELEGRAM_API_HASH:-}
+      TELEGRAM_SESSION_STRING: ${TELEGRAM_SESSION_STRING:-}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+    read_only: true
+    tmpfs:
+      - /tmp:size=16m,mode=1777
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    stop_grace_period: 10s
 
 networks:
   bridge_server:

@@ -1,14 +1,21 @@
-name: Docker Image CICD
+name: CI
 
 on:
   push:
-    branches: [ "main" ]
+    branches: [main, dev]
   pull_request:
-    branches: [ "main" ]
+    branches: [main]
   workflow_dispatch:
 
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
-  test:
+  quality:
     runs-on: ubuntu-latest
 
     steps:
@@ -22,17 +29,26 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: Install dependencies
+      - name: Install locked dependencies
         run: uv sync --frozen
+
+      - name: Lint
+        run: uv run ruff check .
+
+      - name: Check formatting
+        run: uv run ruff format --check .
+
+      - name: Type check
+        run: uv run pyright
 
       - name: Run tests
         run: uv run pytest -q
 
       - name: Compile sources
-        run: uv run python -m compileall src example scripts tests
+        run: uv run python -m compileall -q src example scripts tests
 
   build:
-    needs: test
+    needs: quality
     runs-on: ubuntu-latest
 
     outputs:
@@ -49,35 +65,41 @@ jobs:
         uses: docker/setup-buildx-action@v3
 
       - name: Build Docker image
-        run: docker build -t myapp:${{ steps.get_version.outputs.version }} -f Dockerfile .
+        run: |
+          docker build \
+            --build-arg VERSION=${{ steps.get_version.outputs.version }} \
+            --tag crypto-info-mcp:${{ steps.get_version.outputs.version }} \
+            .
 
       - name: Run Docker container
-        run: docker run -d -p 8123:8123 --name myapp-container myapp:${{ steps.get_version.outputs.version }}
+        run: docker run -d -p 8123:8123 --name crypto-info-mcp-ci crypto-info-mcp:${{ steps.get_version.outputs.version }}
 
       - name: Verify Docker container startup
         run: |
           for _ in $(seq 1 30); do
-            if docker logs myapp-container 2>&1 | grep -q "Application startup complete"; then
-              docker logs myapp-container
+            if docker logs crypto-info-mcp-ci 2>&1 | grep -q "Application startup complete"; then
+              docker exec crypto-info-mcp-ci python -c 'import os; assert os.geteuid() != 0'
+              docker exec crypto-info-mcp-ci sh -lc '! command -v uv'
+              docker logs crypto-info-mcp-ci
               exit 0
             fi
 
-            if [ "$(docker inspect -f '{{.State.Running}}' myapp-container)" != "true" ]; then
-              docker logs myapp-container
+            if [ "$(docker inspect -f '{{.State.Running}}' crypto-info-mcp-ci)" != "true" ]; then
+              docker logs crypto-info-mcp-ci
               exit 1
             fi
 
             sleep 1
           done
 
-          docker logs myapp-container
+          docker logs crypto-info-mcp-ci
           exit 1
 
       - name: Cleanup container
         if: always()
         run: |
-          docker stop myapp-container || true
-          docker rm myapp-container || true
+          docker stop crypto-info-mcp-ci || true
+          docker rm crypto-info-mcp-ci || true
 
   deploy:
     needs: build
@@ -111,7 +133,7 @@ jobs:
           key: ${{ secrets.SSH_PRIVATE_KEY }}
           envs: DEPLOY_VERSION,DEPLOY_COINGECKO_API_KEY,DEPLOY_TELEGRAM_API_ID,DEPLOY_TELEGRAM_API_HASH,DEPLOY_TELEGRAM_SESSION_STRING
           script: |
-            set -e
+            set -eu
 
             REPO_FULL_NAME="${{ github.repository }}"
             REPO_NAME=$(echo "$REPO_FULL_NAME" | cut -d'/' -f2)
@@ -129,5 +151,6 @@ jobs:
               printf 'TELEGRAM_SESSION_STRING=%s\n' "$DEPLOY_TELEGRAM_SESSION_STRING"
             } >> .env
 
+            docker compose config --quiet
             docker compose build --no-cache
             docker compose up -d --no-build --remove-orphans

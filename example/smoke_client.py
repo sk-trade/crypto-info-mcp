@@ -1,11 +1,13 @@
+"""Protocol-level smoke check for a running crypto-info-mcp server."""
+
 import argparse
 import asyncio
 import sys
+from collections.abc import Sequence
+from typing import Protocol
 
 from fastmcp import Client
-from fastmcp.client.client import CallToolResult
 from mcp.types import TextContent
-
 
 REQUIRED_TOOLS = {
     "get_market_overview",
@@ -15,7 +17,15 @@ REQUIRED_TOOLS = {
 }
 
 
-def _text_content(result: CallToolResult) -> str:
+class ToolCallResult(Protocol):
+    @property
+    def content(self) -> Sequence[object]: ...
+
+    @property
+    def is_error(self) -> bool: ...
+
+
+def _text_content(result: ToolCallResult) -> str:
     return "\n".join(
         block.text for block in result.content if isinstance(block, TextContent)
     ).strip()
@@ -32,7 +42,7 @@ async def run_smoke(server_url: str) -> int:
                     f"server is missing expected tool(s): {', '.join(missing_tools)}"
                 )
 
-            result = await client.call_tool(
+            overview_result = await client.call_tool(
                 "get_market_overview",
                 {},
                 raise_on_error=False,
@@ -45,16 +55,16 @@ async def run_smoke(server_url: str) -> int:
         )
         return 1
 
-    text = _text_content(result)
-    if result.is_error or not text:
-        detail = text or "the tool returned no text"
+    overview_text = _text_content(overview_result)
+    if overview_result.is_error or not overview_text:
+        detail = overview_text or "the tool returned no text"
         print(f"MCP smoke check failed: {detail}", file=sys.stderr)
         return 1
 
     print(f"Connected to {server_url}")
     print(f"Tools: {', '.join(sorted(tool_names))}")
     print()
-    print(text)
+    print(overview_text)
     return 0
 
 
